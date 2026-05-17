@@ -57,6 +57,7 @@ Notes:
 - `symbol` is the practical primary identifier for portfolio rows
 - `isin` is nullable and retained when known, but not required for non-gilts
 - No foreign key to `gilt_reference`; historical snapshots must survive reference-table refreshes and matured instruments
+- Friction-specific routing remains derived outside persistence from `symbol`, `asset_type`, and maintained overrides; v1 does not add a stored `friction_class` column
 
 ### Table 2: `signal_readings`
 
@@ -142,6 +143,7 @@ ON decision_log(signal_event_id);
 Notes:
 
 - `instruments_affected` is JSON text, not comma-separated free text
+- Pure note-taking is still represented as a `decision_log` row with a required structured `action`; `notes` is optional detail, not a schema alternative to `action`
 - Example payloads:
   - `["TR27","ISF"]`
   - `[{"symbol":"TR27","side":"sell"},{"symbol":"TG29","side":"buy"}]`

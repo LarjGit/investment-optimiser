@@ -27,6 +27,8 @@ Asset type is inferred from Symbol and Name because the ii CSV has no explicit t
 
 Classification therefore uses a layered approach: overrides first, DMO lookup for gilts, MMF name rules, then a maintained non-gilt instrument classification map with secondary metadata heuristics only as a fallback. Newly seen exchange-traded symbols may still be priced through Yahoo Finance, but they fall back to `other` with an explicit warning until classified well enough for class-specific friction and sleeve logic.
 
+The persisted `asset_type` taxonomy stays limited to the categories above. Friction-specific distinctions that cut across that taxonomy, especially `gilt_etf` and `corporate_bond`, are owned by a separate derived friction-routing layer built from the same maintained symbol metadata and overrides. In other words, a gilt ETF still persists as `etf`, but the friction model may route it to the `gilt_etf` spread bucket without widening the stored enum.
+
 ### Gilt Metadata
 GRY calculation requires exact coupon and maturity date, which are not reliably derivable from the name string alone. The DMO "Gilts in Issue" feeds are the authoritative metadata source for coupon, maturity date, coupon calendar, and instrument type. The DMO feed does not carry TIDM, so the ingestion section also owns the LSE TIDM/ISIN bridge used to join ii symbols to DMO reference rows. DMO metadata is refreshed monthly; the bridge is refreshed in the same monthly cycle but logged as its own source.
 
@@ -53,6 +55,7 @@ The dashboard itself does not read the CSV directly after upload. The saved file
 
 - Flexible normalisation adapter, not a fixed ii parser
 - Asset type inferred from Symbol and Name into the downstream persisted categories; no generic `exchange_traded` type survives into storage
+- Persisted `asset_type` stays narrow; friction-only distinctions such as `gilt_etf` and `corporate_bond` are routed through derived metadata/overrides rather than added to the stored enum
 - Live individual gilt prices come from the LSE price-explorer API; Yahoo Finance is only for non-gilt exchange-traded holdings
 - The dated FTSE 100 P/E input comes from the BlackRock `ISF` HTML page and is cached in SQLite with both `pe_as_of` and `fetched_at`
 - MMF yield = BoE base rate; MMF market value comes from the imported CSV

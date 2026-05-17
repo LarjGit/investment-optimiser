@@ -7,7 +7,7 @@ date: 2026-05-16
 
 ## What We Established
 
-The persistence layer is a single SQLite file owned by one local Streamlit app process. Within that process, a single refresh coordinator owns the portfolio-import step plus all market-data, signal, and reference-data writes; the dashboard is read-mostly and performs only append-only decision-note inserts outside the refresh path. WAL mode is still enabled so short reads and writes can coexist cleanly. The dashboard connects via `st.connection` with SQLAlchemy; refresh and import paths use raw `sqlite3`. Schema evolution is handled by `PRAGMA user_version` with numbered migration functions run on startup - no Alembic. Nothing is ever pruned; the data volume is trivially small for a decade of use.
+The persistence layer is a single SQLite file owned by one local Streamlit app process. Within that process, a single refresh coordinator owns the portfolio-import step plus all market-data, signal, and reference-data writes; the dashboard is read-mostly and performs only append-only `decision_log` inserts outside the refresh path. Every dashboard-written decision entry must include a structured `action` (`acted`, `passed`, or `deferred`) and may also carry optional free-text notes plus optional instrument references. WAL mode is still enabled so short reads and writes can coexist cleanly. The dashboard connects via `st.connection` with SQLAlchemy; refresh and import paths use raw `sqlite3`. Schema evolution is handled by `PRAGMA user_version` with numbered migration functions run on startup - no Alembic. Nothing is ever pruned; the data volume is trivially small for a decade of use.
 
 **Tables confirmed (11 total):**
 
@@ -39,7 +39,7 @@ The persistence layer is a single SQLite file owned by one local Streamlit app p
 
 ## Sub-section Map
 
-- [x] schema-definitions - Exact DDL (column names, types, constraints, composite PKs, indexes) for all 9 tables
+- [x] schema-definitions - Exact DDL (column names, types, constraints, composite PKs, indexes) for all 11 tables
 - [x] refresh-job-structure - Daily refresh job structure: WAL setup, per-source fetch/upsert flow, refresh_log writes, error handling, re-run safety
 - [x] dashboard-db-access - st.connection configuration, secrets.toml setup, query patterns with TTL, staleness detection banner
 

@@ -13,6 +13,8 @@ The scenario engine evaluates two portfolio states under each named deterministi
 - the **current portfolio**
 - the **post-friction executable portfolio** derived from the optimizer target after trade construction, blocked-trade handling, friction gating, rounding, and residual-cash handling
 
+For this second state, friction handling is explicit: green trades are implemented, amber trades remain implemented but are flagged as marginal, and red trades are absent from the executable state. A blocked red switch leaves the current holding in place; blocked deployment of free cash leaves that capital in MMF/cash.
+
 The executable portfolio is the main comparison state. The raw optimizer target may be retained as a diagnostic, but it is not the headline scenario portfolio because it may not be reachable in practice on the day.
 
 ### Repricing rules by asset type
@@ -122,7 +124,7 @@ If any unmodelled weight exists, show a visible caveat that part of the portfoli
 
 ## Decisions Made
 
-- Scenario engine evaluates `current` and `post-friction executable` portfolio states; executable is the headline recommended comparison
+- Scenario engine evaluates `current` and `post-friction executable` portfolio states; executable is the headline recommended comparison, with red trades excluded and amber trades retained as marginal
 - Conventional gilts are repriced exactly under each scenario by shocking yield and re-solving clean price from cash flows
 - Index-linked gilts use the same exact repricing pattern on the real-yield path; without credible inflation assumptions they fall back to `unmodelled_held_flat`
 - MMF/cash keep capital value flat; only running yield changes by scenario

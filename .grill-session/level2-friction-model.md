@@ -35,6 +35,21 @@ total_friction = (2 × commission) + (spread_bps / 10000 × position_size) + sta
 
 These are parameterised in the knobs panel and editable by the user. Live spread data is not fetched — free public APIs do not expose retail spread data reliably.
 
+### Friction-class routing
+
+The friction layer does not widen the persisted `asset_type` enum. It derives a separate routing class at evaluation time from the stored `asset_type` plus maintained symbol metadata and overrides.
+
+Routing rules:
+
+- `gilt_conventional` -> Conventional gilts bucket
+- `gilt_index_linked` -> Index-linked gilts bucket
+- persisted `etf` with explicit gilt-ETF metadata/override -> Gilt ETFs bucket
+- any persisted holding with explicit corporate-bond metadata/override -> Corporate bonds bucket
+- `mmf` -> Cash / money market bucket
+- plain `equity`, `investment_trust`, `reit`, `fund`, unresolved `other`, and persisted `etf` without a more specific override -> Equities / investment trusts bucket
+
+This keeps storage stable while still allowing class-specific friction for instruments such as gilt ETFs and corporate bonds.
+
 ### Break-Even Threshold
 
 The tool calculates how many months it takes for the yield improvement to recover the total friction cost:
@@ -48,13 +63,21 @@ A configurable **expected hold period** (default: 2 years / 24 months) is set in
 
 ### Trade Gate Output
 
-The gate does not produce a binary yes/no. It produces the break-even period in months with colour coding:
+The gate does not produce a binary yes/no at the signal-display layer. It produces the break-even period in months with colour coding:
 
 - **Green** — break-even < 12 months (clearly worth it)
 - **Amber** — break-even 12–24 months (marginal; within but close to the expected hold horizon)
 - **Red** — break-even > 24 months (not recommended)
 
 Thresholds are derived from the expected hold parameter: green = < 50% of hold, amber = 50–100%, red = > 100%.
+
+For system-generated portfolio recommendations, the gate is authoritative when building the executable result:
+
+- **Green** - include the trade in the executable recommendation
+- **Amber** - include the trade, but mark it as marginal in the recommendation and dashboard
+- **Red** - exclude the trade from the executable recommendation and surface the blocked reason explicitly
+
+When a red trade is excluded, the system keeps the current position unchanged if the blocked action was a switch out of an existing holding. If the blocked action was deployment of free cash, the blocked amount remains in MMF or cash rather than being forced into the target instrument.
 
 Dashboard display example:
 > "T26 yields 40bps more than TG28 — switch recovers costs in **4 months** ✓"
@@ -71,8 +94,9 @@ An additional plain-English note is shown in the dashboard whenever a holding is
 
 - Friction = commission (both legs) + spread (by asset class, parameterised) + stamp duty (equities only)
 - Spread modelled as configurable defaults per asset class; not fetched live
+- Friction routing is derived from stored `asset_type` plus maintained metadata/overrides; v1 does not expand the persisted enum just to support spread buckets
 - Expected hold default: 2 years, editable in knobs panel
-- Trade gate output: break-even in months with green/amber/red colouring, not binary
+- Trade gate output: break-even in months with green/amber/red colouring; for executable recommendations green flows through, amber stays with a warning, red is blocked
 - Signal and friction layers are strictly separated; signals always surface, friction annotates them
 - Near-maturity holdings handled by break-even maths; dashboard adds a plain-English maturity note at < 12 months
 

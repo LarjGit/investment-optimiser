@@ -47,7 +47,7 @@ The dashboard stays read-mostly. Queries should be plain SELECT statements that 
 
 ### Write path
 
-The dashboard writes only for the append-only note form in the Decision Log tab. That write uses the same named connection via a short SQLAlchemy session:
+The dashboard writes only for the append-only Decision Log entry form. That write uses the same named connection via a short SQLAlchemy session:
 
 ```python
 with conn.session as s:
@@ -109,7 +109,7 @@ The rest of the app must still render. Partial data degradation is surfaced expl
 - DB URL stored in project-local `.streamlit/secrets.toml`, not hard-coded in Python
 - All reads use `conn.query(...)` with explicit TTLs; never rely on indefinite caching
 - Freshness-sensitive reads use `ttl=60`; heavier history reads use `ttl=300`
-- Decision-log note writes use `conn.session` with a short commit-scoped transaction
+- Decision-log entry writes use `conn.session` with a short commit-scoped transaction; each row includes a required structured `action` plus optional notes and instruments
 - After successful note save or manual refresh, clear cached data and rerun immediately
 - Freshness is computed from the latest successful `refresh_log` row per source
 - Dashboard freshness UX uses a compact top summary plus local per-section warnings/errors

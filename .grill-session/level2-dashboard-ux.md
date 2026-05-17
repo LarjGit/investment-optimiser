@@ -39,7 +39,7 @@ Also in the sidebar: a `Refresh now` button that triggers the refresh coordinato
 
 ### Decision Log Tab
 - Read-only `st.dataframe` of decision history, newest first
-- `Add note` form above the table using `st.text_area` plus `st.button("Save note")`
+- `Log decision` form above the table using an explicit `action` control (`acted`, `passed`, `deferred`), optional instrument selection, and `st.text_area` for notes plus `st.button("Save entry")`
 - Append-only; no editing or deletion of historical entries
 
 ### Data Loading
@@ -61,7 +61,7 @@ The dashboard reads persisted tables only. It does not fetch raw market data dir
 - Portfolio tab: KPI metrics plus dual horizontal bar charts and holdings dataframe
 - Signals tab: 2x2 card grid, all four signals always shown
 - Scenarios tab: read-only comparison table with active scenario highlighted
-- Decision Log tab: append-only log plus free-text note form
+- Decision Log tab: append-only log plus structured action entry form with optional notes
 - Dashboard is read-only for market and signal data: all reads go through persisted SQLite tables via `st.connection`
 - Freshness UX is per source with graceful degradation; partial data issues never crash the whole page
 

@@ -23,12 +23,12 @@ Example shape:
 II_COLUMN_MAP = {
     "Symbol": "symbol",
     "Name": "name",
-    "Quantity": "qty",
+    "Qty": "qty",
     "Price": "_raw_price",
     "Market Value": "market_value_gbp",
     "Book Cost": "book_cost_gbp",
 }
-II_REQUIRED_COLUMNS = {"Symbol", "Name", "Quantity", "Price", "Market Value", "Book Cost"}
+II_REQUIRED_COLUMNS = {"Symbol", "Name", "Qty", "Price", "Market Value", "Book Cost"}
 ```
 
 ### Hard fail on missing columns
@@ -53,7 +53,7 @@ Classification runs as a cascade after price parsing:
 5. **Secondary metadata fallback** - if no explicit map entry exists, use lightweight exchange-traded metadata or name heuristics to infer a broad class where it is obvious.
 6. **Safe fallback** - classify as `other` and populate `import_warning` instructing the user to add an override or map entry.
 
-`exchange_traded` is not a persisted asset type. The ingest layer must emit the categories required by persistence, friction, and sleeve logic. A new symbol can still enter the system without breaking import, but until it is classified beyond `other`, only generic pricing and display behaviour should apply.
+`exchange_traded` is not a persisted asset type. The ingest layer must emit the stored categories required by persistence and sleeve logic. Friction-specific distinctions that do not fit that enum, such as `gilt_etf` and `corporate_bond`, are handled by a separate derived routing layer fed by the same maintained symbol metadata and overrides. A new symbol can still enter the system without breaking import, but until it is classified beyond `other`, only generic pricing and the fallback friction bucket should apply.
 
 If the DMO table has not yet been downloaded on first run, potential gilt symbols remain importable but should carry `import_warning` and be revisited after the monthly reference refresh rather than silently masquerading as a generic exchange-traded asset.
 

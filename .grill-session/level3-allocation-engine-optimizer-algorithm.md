@@ -267,9 +267,13 @@ Workflow:
 3. construct trade list against current holdings
 4. round gilt trades to nearest `GBP 100` nominal
 5. leave residual cash in MMF/cash
-6. apply friction gate after trade construction
+6. apply the friction gate after trade construction
+7. keep green trades as executable, keep amber trades as executable with a marginal flag, and remove red trades from the executable set
+8. rebuild the final executable holdings state after blocked red trades, leaving blocked switch positions unchanged and blocked free cash in MMF/cash
 
 Do not enforce minimum trade size or fixed dealing fee inside the LP. Those belong in the post-solve implementation layer.
+
+The friction gate is therefore not just explanatory text on top of the optimizer output. It is the final authority for the system-generated `executable_recommended` portfolio that downstream scenarios and dashboards consume.
 
 ### Failure handling
 
@@ -321,6 +325,7 @@ Auditability is a first-class requirement, not an optional reporting layer.
 - Sleeve contract requires diagnostics payload, not just target weights/trades
 - Top layer is authoritative in conflicts; sleeves return degraded-status fallbacks rather than silently relaxing upstream constraints
 - Lot rounding and friction gating happen after the LP solve in trade construction
+- Green trades survive into `executable_recommended`; amber trades survive with a marginal flag; red trades are removed and the holdings state is rebuilt conservatively
 - Every solve writes a replayable audit snapshot to `allocation_runs`
 
 ## Remaining Open Questions

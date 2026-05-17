@@ -40,7 +40,7 @@ When a sleeve cannot satisfy its local constraints cleanly, it must return a vis
 
 ### Output to Trade Recommendations
 
-The allocator first produces continuous target weights, then sleeve-level target holdings, then an executable trade list against the current portfolio. Post-solve rounding, residual cash handling, and the friction gate happen after optimisation. The user sees the executable recommendation, not a frictionless paper target.
+The allocator first produces continuous target weights, then sleeve-level target holdings, then an executable trade list against the current portfolio. Post-solve rounding, residual cash handling, and the friction gate happen after optimisation. The friction gate is authoritative for the executable result: green trades go through, amber trades stay in with a visible marginal flag, and red trades are removed from the executable recommendation. The user therefore sees the executable recommendation, not a frictionless paper target.
 
 ### Audit and Replay
 
@@ -51,7 +51,7 @@ Every solver run persists a replayable audit record in the persistence layer's `
 Scenario analysis applies to the full portfolio and compares two states:
 
 - the current portfolio
-- the executable recommended portfolio after rounding, blocked-trade handling, and friction gating
+- the executable recommended portfolio after rounding, blocked-trade handling, and friction gating, where red friction outcomes remain untraded and amber outcomes remain included but marked marginal
 
 Conventional gilts are repriced exactly from the shared cash-flow engine under named deterministic rate shifts. Index-linked gilts use the same path when the inflation assumptions are credible; otherwise they remain visible but explicitly marked as not fully modelled. MMF and cash hold capital value flat while income changes. Other holdings stay in totals with explicit `unmodelled_held_flat` disclosure unless a sleeve has a stronger scenario model.
 
@@ -62,7 +62,7 @@ Conventional gilts are repriced exactly from the shared cash-flow engine under n
 - Fixed-income sleeve remains analytically strongest: conventional gilt GRY, optional index-linked participation with RPI assumption, and MMF yield from BoE base rate
 - Live gilt candidate prices come from the LSE price-explorer API and DMO reference data; candidate scope is not limited to current holdings
 - Constraints split into top-layer policy rules and sleeve-local implementation rules
-- Output path is target weights to sleeve implementation to executable trade list to friction-gated recommendations
+- Output path is target weights to sleeve implementation to executable trade list to friction-gated recommendations, with red trades removed and amber trades retained as marginal
 - Every solve persists a replayable audit snapshot in `allocation_runs`
 - Scenario analysis compares current versus executable recommended portfolios and discloses where positions are exact-modelled versus held flat
 - Named deterministic scenarios remain the v1 scenario framework
