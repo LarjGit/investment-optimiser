@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init *)",
+      "Bash(gh auth *)",
+      "Skill(ext-research)",
+      "WebSearch",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "WebFetch(domain:www.dmo.gov.uk)",
+      "WebFetch(domain:www.bankofengland.co.uk)",
+      "WebFetch(domain:www.hl.co.uk)",
+      "WebFetch(domain:www.dividenddata.co.uk)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.scipy.org)"
+    ]
+  }
+}
