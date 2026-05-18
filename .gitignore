@@ -6,3 +6,5 @@ data/*.db-shm
 data/*.db-wal
 data/*.sqlite
 data/*.sqlite3
+data/portfolio_latest.csv
+test_tmp.db
