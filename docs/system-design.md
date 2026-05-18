@@ -415,7 +415,7 @@ Values live in `st.session_state` with explicit keys so all tabs read the same c
 
 The canonical v1 field names and defaults for those sidebar assumptions are frozen in `src/investment_optimiser/policy_pack_v1.json` so allocator, scenario, and recommendation slices can consume the same schema.
 
-The sidebar also includes a `Refresh now` button. A successful refresh clears cached query results and reruns the app immediately.
+The Portfolio tab includes a `Refresh market data` control near the holdings KPIs and table. It refreshes market and reference sources only, remains separate from portfolio CSV import, surfaces a visible last-successful refresh timestamp, clears cached query results on success, and reruns the app immediately.
 
 ### Portfolio Tab
 

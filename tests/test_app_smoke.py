@@ -58,8 +58,11 @@ def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
     } <= tables
 
 
-def test_app_imports_ii_csv_and_surfaces_row_warnings(tmp_path: Path) -> None:
+def test_app_uploads_csv_and_immediately_updates_authoritative_snapshot(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "investment_optimiser.db"
+    saved_csv_path = tmp_path / "portfolio_latest.csv"
     app_path = Path(__file__).resolve().parent.parent / "app.py"
 
     app = AppTest.from_file(str(app_path))
@@ -79,17 +82,18 @@ def test_app_imports_ii_csv_and_surfaces_row_warnings(tmp_path: Path) -> None:
             "text/csv",
         )
     )
-    app.button[0].click()
     app.run(timeout=10)
 
     assert not app.exception
-    assert any("Price could not be parsed" in warning.value for warning in app.warning)
+    assert saved_csv_path.exists()
     assert len(
         fetch_portfolio_snapshot(
             f"sqlite:///{db_path.as_posix()}",
             snapshot_date=date.today().isoformat(),
         )
     ) == 2
+    assert "Refresh market data" in {button.label for button in app.button}
+    assert "Upload Interactive Investor CSV" not in {button.label for button in app.button}
 
 
 def test_portfolio_tab_renders_kpis_from_latest_persisted_snapshot(tmp_path: Path) -> None:
@@ -151,3 +155,64 @@ def test_portfolio_tab_renders_kpis_from_latest_persisted_snapshot(tmp_path: Pat
     assert portfolio_metrics["Total Portfolio Value"] == "GBP 10,162"
     assert portfolio_metrics["Holdings"] == "2"
     assert portfolio_metrics["Cash & MMF Share"] == "2.5%"
+
+
+def test_portfolio_tab_shows_last_successful_market_refresh_after_failure(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO refresh_log (
+                source,
+                run_started_at,
+                finished_at,
+                status,
+                error_msg
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "boe",
+                "2026-05-18T08:59:00Z",
+                "2026-05-18T09:00:00Z",
+                "completed",
+                None,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO refresh_log (
+                source,
+                run_started_at,
+                finished_at,
+                status,
+                error_msg
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "boe",
+                "2026-05-18T09:59:00Z",
+                "2026-05-18T10:00:00Z",
+                "failed",
+                "Example failure",
+            ),
+        )
+        connection.commit()
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {"db": {"url": database_url}}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    markdown_values = [element.value for element in app.markdown]
+    assert any(
+        "Last successful market refresh" in value
+        and "2026-05-18 09:00 UTC" in value
+        for value in markdown_values
+    )
