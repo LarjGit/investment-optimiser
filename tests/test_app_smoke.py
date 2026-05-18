@@ -4,7 +4,12 @@ import sqlite3
 
 from streamlit.testing.v1 import AppTest
 
-from investment_optimiser.portfolio_import import fetch_portfolio_snapshot
+from investment_optimiser.db import initialize_database
+from investment_optimiser.portfolio_import import (
+    Holding,
+    fetch_portfolio_snapshot,
+    replace_portfolio_snapshot,
+)
 
 
 def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
@@ -85,3 +90,64 @@ def test_app_imports_ii_csv_and_surfaces_row_warnings(tmp_path: Path) -> None:
             snapshot_date=date.today().isoformat(),
         )
     ) == 2
+
+
+def test_portfolio_tab_renders_kpis_from_latest_persisted_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-17",
+        holdings=[
+            Holding(
+                symbol="OLD1",
+                name="Older Holding",
+                asset_type="other",
+                qty=10.0,
+                clean_price_gbp=10.0,
+                market_value_gbp=100.0,
+                book_cost_gbp=95.0,
+            )
+        ],
+    )
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-18",
+        holdings=[
+            Holding(
+                symbol="TR68",
+                name="Treasury 2068",
+                asset_type="other",
+                qty=100.0,
+                clean_price_gbp=99.12,
+                market_value_gbp=9912.0,
+                book_cost_gbp=10000.0,
+            ),
+            Holding(
+                symbol="CSH2",
+                name="Royal London Short Term Money Market",
+                asset_type="mmf",
+                qty=250.0,
+                clean_price_gbp=None,
+                market_value_gbp=250.0,
+                book_cost_gbp=250.0,
+            ),
+        ],
+    )
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {"db": {"url": database_url}}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    portfolio_metrics = {
+        metric.label: metric.value
+        for metric in app.metric
+    }
+    assert portfolio_metrics["Total Portfolio Value"] == "GBP 10,162"
+    assert portfolio_metrics["Holdings"] == "2"
+    assert portfolio_metrics["Cash & MMF Share"] == "2.5%"

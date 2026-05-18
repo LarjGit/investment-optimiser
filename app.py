@@ -7,6 +7,7 @@ from typing import Any
 import streamlit as st
 
 from investment_optimiser.db import initialize_database
+from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.portfolio_import import (
     IngestionError,
     import_ii_portfolio_snapshot,
@@ -123,13 +124,6 @@ def apply_shell_styles() -> None:
             font-size: 0.92rem;
         }
 
-        .panel-card {
-            padding: 1.15rem 1.2rem;
-            border-radius: 18px;
-            background: rgba(18, 24, 33, 0.72);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            margin-bottom: 1rem;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -202,7 +196,6 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             FROM portfolio_snapshots
         )
         ORDER BY market_value_gbp DESC, symbol ASC
-        LIMIT 10
         """,
         ttl=60,
     )
@@ -285,10 +278,7 @@ def render_hero(schema_version: int, summary: dict[str, Any]) -> None:
             <div class="hero-kicker">Local Decision Support</div>
             <h1 class="hero-title">Investment Optimiser Control Room</h1>
             <div class="hero-copy">
-                Schema v{schema_version} is live. This shell is already reading
-                persisted SQLite state, so each tab can grow from the same durable
-                local record instead of disposable demo text.
-                Latest portfolio snapshot: {snapshot_date}.
+                Schema v{schema_version}. Latest portfolio snapshot: {snapshot_date}.
             </div>
         </div>
         """,
@@ -310,77 +300,91 @@ def render_signal_banners(active_signals: Any) -> None:
 
 
 def render_portfolio_tab(state: dict[str, Any]) -> None:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
     st.subheader("Portfolio State")
     summary = state["summary"]
     latest_snapshot = summary["latest_snapshot_date"] or "No snapshot loaded"
-    st.write(
-        f"Latest persisted snapshot: `{latest_snapshot}`. "
-        "This tab is ready to surface holdings, allocation, and duration metrics "
-        "as soon as imports begin writing to SQLite."
+    holdings_frame = state["holdings"]
+    portfolio_kpis = build_portfolio_kpis(
+        holdings_frame.to_dict("records"),
+        summary["latest_snapshot_date"],
     )
-    if state["holdings"].empty:
+    st.write(
+        f"Latest snapshot: `{latest_snapshot}`."
+    )
+    if holdings_frame.empty:
         st.info("`portfolio_snapshots` is empty. Import and refresh flows will populate this view.")
     else:
-        st.dataframe(state["holdings"], use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_import_panel(database_url: str) -> None:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
-    st.subheader("Portfolio Import")
-    st.write(
-        "Upload an Interactive Investor CSV to persist today's authoritative "
-        "portfolio snapshot into SQLite."
-    )
-
-    uploaded_file = st.file_uploader(
-        "Interactive Investor CSV",
-        type="csv",
-        key="ii_csv_upload",
-    )
-    if st.button("Import Interactive Investor CSV", type="primary"):
-        if uploaded_file is None:
-            st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = "Choose a CSV file to import."
-        else:
-            try:
-                result = import_ii_portfolio_snapshot(
-                    database_url,
-                    uploaded_file,
-                    snapshot_date=date.today().isoformat(),
-                )
-            except IngestionError as exc:
-                st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = str(exc)
-                st.session_state.pop(PORTFOLIO_IMPORT_FEEDBACK_KEY, None)
-            else:
-                st.session_state[PORTFOLIO_IMPORT_FEEDBACK_KEY] = {
-                    "snapshot_date": result.snapshot_date,
-                    "imported_count": result.imported_count,
-                    "warning_messages": result.warning_messages,
-                }
-                st.session_state.pop(PORTFOLIO_IMPORT_ERROR_KEY, None)
-                st.cache_data.clear()
-                st.rerun()
-
-    import_error = st.session_state.get(PORTFOLIO_IMPORT_ERROR_KEY)
-    if import_error:
-        st.error(import_error)
-
-    import_feedback = st.session_state.get(PORTFOLIO_IMPORT_FEEDBACK_KEY)
-    if import_feedback:
-        st.success(
-            "Imported "
-            f"{import_feedback['imported_count']} holdings for "
-            f"{import_feedback['snapshot_date']}."
+        metric_columns = st.columns(3)
+        metric_columns[0].metric(
+            "Total Portfolio Value",
+            f"GBP {portfolio_kpis.total_value_gbp:,.0f}",
+            border=True,
         )
-        for warning_message in import_feedback["warning_messages"]:
-            st.warning(warning_message)
+        metric_columns[1].metric(
+            "Holdings",
+            str(portfolio_kpis.holding_count),
+            border=True,
+        )
+        metric_columns[2].metric(
+            "Cash & MMF Share",
+            f"{portfolio_kpis.mmf_weight_pct:.1f}%",
+            border=True,
+        )
+        st.dataframe(holdings_frame, width="stretch", hide_index=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
+def render_import_panel(database_url: str, has_snapshot: bool) -> None:
+    expander_label = "Import or replace portfolio snapshot"
+    with st.expander(expander_label, expanded=not has_snapshot):
+        st.write(
+            "Upload an Interactive Investor CSV to persist today's authoritative "
+            "portfolio snapshot into SQLite."
+        )
+
+        uploaded_file = st.file_uploader(
+            "Interactive Investor CSV",
+            type="csv",
+            key="ii_csv_upload",
+        )
+        if st.button("Import Interactive Investor CSV", type="primary"):
+            if uploaded_file is None:
+                st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = "Choose a CSV file to import."
+            else:
+                try:
+                    result = import_ii_portfolio_snapshot(
+                        database_url,
+                        uploaded_file,
+                        snapshot_date=date.today().isoformat(),
+                    )
+                except IngestionError as exc:
+                    st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = str(exc)
+                    st.session_state.pop(PORTFOLIO_IMPORT_FEEDBACK_KEY, None)
+                else:
+                    st.session_state[PORTFOLIO_IMPORT_FEEDBACK_KEY] = {
+                        "snapshot_date": result.snapshot_date,
+                        "imported_count": result.imported_count,
+                        "warning_messages": result.warning_messages,
+                    }
+                    st.session_state.pop(PORTFOLIO_IMPORT_ERROR_KEY, None)
+                    st.cache_data.clear()
+                    st.rerun()
+
+        import_error = st.session_state.get(PORTFOLIO_IMPORT_ERROR_KEY)
+        if import_error:
+            st.error(import_error)
+
+        import_feedback = st.session_state.get(PORTFOLIO_IMPORT_FEEDBACK_KEY)
+        if import_feedback:
+            st.success(
+                "Imported "
+                f"{import_feedback['imported_count']} holdings for "
+                f"{import_feedback['snapshot_date']}."
+            )
+            for warning_message in import_feedback["warning_messages"]:
+                st.warning(warning_message)
 
 
 def render_signals_tab(state: dict[str, Any]) -> None:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
     st.subheader("Signals")
     active_signal_count = int(state["summary"]["active_signal_count"] or 0)
     st.write(
@@ -391,12 +395,10 @@ def render_signals_tab(state: dict[str, Any]) -> None:
     if state["active_signals"].empty:
         st.info("No active signal episodes are stored yet.")
     else:
-        st.dataframe(state["active_signals"], use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.dataframe(state["active_signals"], width="stretch", hide_index=True)
 
 
 def render_scenarios_tab(state: dict[str, Any]) -> None:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
     st.subheader("Scenarios")
     allocation_run_count = int(state["summary"]["allocation_run_count"] or 0)
     st.write(
@@ -405,12 +407,10 @@ def render_scenarios_tab(state: dict[str, Any]) -> None:
         "persisted optimisation records."
     )
     refresh_frame = state["refresh_state"]
-    st.dataframe(refresh_frame, use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.dataframe(refresh_frame, width="stretch", hide_index=True)
 
 
 def render_decision_log_tab(state: dict[str, Any]) -> None:
-    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
     st.subheader("Decision Log")
     decision_count = int(state["summary"]["decision_count"] or 0)
     st.write(
@@ -420,15 +420,13 @@ def render_decision_log_tab(state: dict[str, Any]) -> None:
     if state["decisions"].empty:
         st.info("No decisions have been logged yet.")
     else:
-        st.dataframe(state["decisions"], use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.dataframe(state["decisions"], width="stretch", hide_index=True)
 
 
 def main() -> None:
     database_url = get_database_url()
     schema_version = initialize_database(database_url)
     apply_shell_styles()
-    render_import_panel(database_url)
     connection = st.connection("db", type="sql", url=database_url)
     state = read_shell_state(connection)
     summary = state["summary"]
@@ -439,15 +437,15 @@ def main() -> None:
     summary_columns = st.columns(4)
     with summary_columns[0]:
         render_summary_card(
-            "Portfolio Snapshot",
-            str(int(summary["holding_count"] or 0)),
+            "Latest Snapshot",
             metric_note(summary["latest_snapshot_date"]),
+            f"{int(summary['holding_count'] or 0)} holdings loaded",
         )
     with summary_columns[1]:
         render_summary_card(
-            "Tracked Value",
-            f"GBP {float(summary['total_value'] or 0):,.0f}",
-            "Aggregated from the latest persisted holdings snapshot",
+            "Allocation Runs",
+            str(int(summary["allocation_run_count"] or 0)),
+            "Persisted optimiser records available for replay",
         )
     with summary_columns[2]:
         render_summary_card(
@@ -468,6 +466,10 @@ def main() -> None:
 
     with portfolio_tab:
         render_portfolio_tab(state)
+        render_import_panel(
+            database_url,
+            has_snapshot=bool(summary["latest_snapshot_date"]),
+        )
     with signals_tab:
         render_signals_tab(state)
     with scenarios_tab:
