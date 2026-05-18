@@ -210,9 +210,8 @@ def test_portfolio_tab_shows_last_successful_market_refresh_after_failure(
     app.run(timeout=10)
 
     assert not app.exception
-    markdown_values = [element.value for element in app.markdown]
+    caption_values = [element.value for element in app.caption]
     assert any(
-        "Last successful market refresh" in value
-        and "2026-05-18 09:00 UTC" in value
-        for value in markdown_values
+        "Last refresh" in value and "2026-05-18 09:00 UTC" in value
+        for value in caption_values
     )
