@@ -29,3 +29,4 @@ uv run pytest tests/test_app_smoke.py
 ## Documentation
 
 - [System design](docs/system-design.md)
+- [V1 policy pack](docs/policy-pack-v1.md)

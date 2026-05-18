@@ -1,0 +1,325 @@
+{
+  "policy_pack_name": "investment_optimiser",
+  "policy_version": "v1",
+  "scenario_set_name": "v1",
+  "frozen_at": "2026-05-18",
+  "baseline_bucket_model": {
+    "model_name": "bucketed_weight_baseline_v1",
+    "weight_unit": "pct_of_portfolio",
+    "weight_sum_rule": "weights must sum to 100.0",
+    "assignment_priority": [
+      "explicit_bucket_override",
+      "derived_metadata_rule",
+      "asset_type_fallback"
+    ],
+    "buckets": [
+      {
+        "id": "liquidity_reserve",
+        "label": "Liquidity reserve",
+        "description": "Cash and MMF held for optionality, near-term deployment, and settlement.",
+        "target_role": "capital_preservation_and_optional_deployment",
+        "default_asset_type_fallbacks": [
+          "mmf"
+        ],
+        "manual_inclusion_notes": [
+          "free_cash_balance"
+        ]
+      },
+      {
+        "id": "short_duration_nominal_gilts",
+        "label": "Short-duration nominal gilts",
+        "description": "Conventional gilts with maturity up to and including 5 years.",
+        "target_role": "defensive_income_and_short_duration_anchor",
+        "default_asset_type_fallbacks": [
+          "gilt_conventional"
+        ],
+        "derived_rules": [
+          "maturity_years <= 5.0"
+        ]
+      },
+      {
+        "id": "long_duration_nominal_gilts",
+        "label": "Long-duration nominal gilts",
+        "description": "Conventional gilts with maturity above 5 years.",
+        "target_role": "duration_exposure_and_defensive_convexity",
+        "default_asset_type_fallbacks": [
+          "gilt_conventional"
+        ],
+        "derived_rules": [
+          "maturity_years > 5.0"
+        ]
+      },
+      {
+        "id": "index_linked_gilts",
+        "label": "Index-linked gilts",
+        "description": "UK index-linked gilts retained as a distinct sleeve.",
+        "target_role": "inflation_protection_when_real_to_nominal_comparison_is_credible",
+        "default_asset_type_fallbacks": [
+          "gilt_index_linked"
+        ]
+      },
+      {
+        "id": "listed_risk_assets",
+        "label": "Listed risk assets",
+        "description": "Equities and exchange-traded listed risk assets tracked as the main growth bucket.",
+        "target_role": "portfolio_growth_and_risk_budget",
+        "default_asset_type_fallbacks": [
+          "equity",
+          "etf",
+          "investment_trust"
+        ]
+      },
+      {
+        "id": "diversifiers_and_manual",
+        "label": "Diversifiers and manual bucket",
+        "description": "REITs, funds, specialist holdings, and any instrument that needs an explicit manual bucket override.",
+        "target_role": "catch_all_for_non_core_assets_that_need_bounded_or_manual_treatment",
+        "default_asset_type_fallbacks": [
+          "reit",
+          "fund",
+          "other"
+        ]
+      }
+    ]
+  },
+  "named_scenarios": [
+    {
+      "id": "rates_up_parallel",
+      "label": "Rates up parallel",
+      "description": "Nominal and real yields rise together across the curve.",
+      "base_shocks": {
+        "nominal_curve_parallel_bps": 100.0,
+        "nominal_curve_2s10s_steepener_bps": 0.0,
+        "real_yield_parallel_bps": 75.0,
+        "listed_risk_assets_pct": -5.0,
+        "diversifiers_and_manual_pct": -4.0,
+        "cash_mmf_pct": 0.0
+      }
+    },
+    {
+      "id": "rates_down_parallel",
+      "label": "Rates down parallel",
+      "description": "Nominal and real yields fall together across the curve.",
+      "base_shocks": {
+        "nominal_curve_parallel_bps": -100.0,
+        "nominal_curve_2s10s_steepener_bps": 0.0,
+        "real_yield_parallel_bps": -75.0,
+        "listed_risk_assets_pct": 5.0,
+        "diversifiers_and_manual_pct": 3.0,
+        "cash_mmf_pct": 0.0
+      }
+    },
+    {
+      "id": "bear_steepener",
+      "label": "Bear steepener",
+      "description": "The long end sells off more than the front end while risk assets weaken.",
+      "base_shocks": {
+        "nominal_curve_parallel_bps": 25.0,
+        "nominal_curve_2s10s_steepener_bps": 100.0,
+        "real_yield_parallel_bps": 75.0,
+        "listed_risk_assets_pct": -10.0,
+        "diversifiers_and_manual_pct": -8.0,
+        "cash_mmf_pct": 0.0
+      }
+    },
+    {
+      "id": "equity_drawdown",
+      "label": "Equity drawdown",
+      "description": "Risk assets fall sharply while government yields rally modestly.",
+      "base_shocks": {
+        "nominal_curve_parallel_bps": -50.0,
+        "nominal_curve_2s10s_steepener_bps": 0.0,
+        "real_yield_parallel_bps": -25.0,
+        "listed_risk_assets_pct": -20.0,
+        "diversifiers_and_manual_pct": -12.0,
+        "cash_mmf_pct": 0.0
+      }
+    },
+    {
+      "id": "inflation_surprise",
+      "label": "Inflation surprise",
+      "description": "Inflation expectations reprice higher, hurting long duration assets and pressuring risk assets.",
+      "base_shocks": {
+        "nominal_curve_parallel_bps": 50.0,
+        "nominal_curve_2s10s_steepener_bps": 25.0,
+        "real_yield_parallel_bps": 100.0,
+        "listed_risk_assets_pct": -8.0,
+        "diversifiers_and_manual_pct": -6.0,
+        "cash_mmf_pct": 0.0
+      }
+    }
+  ],
+  "default_constraints": {
+    "long_only": true,
+    "fully_invested": true,
+    "baseline_tilt_band_pct": 10.0,
+    "turnover_limit_pct_by_regime": {
+      "constructive": 10.0,
+      "normal": 15.0,
+      "defensive": 25.0
+    },
+    "duration_floor_years": 2.0,
+    "duration_ceiling_years": 8.0,
+    "liquidity_concentration_10y_plus_pct": 35.0,
+    "max_maturity_years": 15.0,
+    "max_single_position_pct": 12.5,
+    "minimum_cash_mmf_pct": 5.0,
+    "minimum_short_duration_pct": 10.0,
+    "scenario_floor_pct_of_current_value": {
+      "rates_up_parallel": 94.0,
+      "bear_steepener": 92.0,
+      "equity_drawdown": 88.0,
+      "inflation_surprise": 90.0
+    }
+  },
+  "shared_assumption_schema": {
+    "active_scenario_default": "rates_up_parallel",
+    "allowed_scenario_magnitudes": [
+      0.5,
+      1.0,
+      1.5
+    ],
+    "fields": [
+      {
+        "key": "active_scenario",
+        "label": "Active scenario",
+        "type": "enum",
+        "default": "rates_up_parallel",
+        "options_from": "named_scenarios"
+      },
+      {
+        "key": "scenario_magnitude",
+        "label": "Scenario magnitude",
+        "type": "float",
+        "default": 1.0,
+        "allowed_values": [
+          0.5,
+          1.0,
+          1.5
+        ]
+      },
+      {
+        "key": "gry_improvement_threshold_bps",
+        "label": "GRY improvement threshold",
+        "type": "float",
+        "default": 25.0,
+        "unit": "bps"
+      },
+      {
+        "key": "duration_floor_years",
+        "label": "Duration floor",
+        "type": "float",
+        "default": 2.0,
+        "unit": "years"
+      },
+      {
+        "key": "duration_ceiling_years",
+        "label": "Duration ceiling",
+        "type": "float",
+        "default": 8.0,
+        "unit": "years"
+      },
+      {
+        "key": "liquidity_concentration_10y_plus_pct",
+        "label": "10y+ liquidity concentration threshold",
+        "type": "float",
+        "default": 35.0,
+        "unit": "pct"
+      },
+      {
+        "key": "max_maturity_years",
+        "label": "Max maturity",
+        "type": "float",
+        "default": 15.0,
+        "unit": "years"
+      },
+      {
+        "key": "max_single_position_pct",
+        "label": "Max single-position concentration",
+        "type": "float",
+        "default": 12.5,
+        "unit": "pct"
+      },
+      {
+        "key": "minimum_cash_mmf_pct",
+        "label": "Minimum MMF or cash floor",
+        "type": "float",
+        "default": 5.0,
+        "unit": "pct"
+      },
+      {
+        "key": "minimum_short_duration_pct",
+        "label": "Minimum short-duration floor",
+        "type": "float",
+        "default": 10.0,
+        "unit": "pct"
+      },
+      {
+        "key": "expected_rpi_pct",
+        "label": "Expected RPI assumption",
+        "type": "float",
+        "default": 3.0,
+        "unit": "pct"
+      },
+      {
+        "key": "interactive_investor_trade_fee_gbp",
+        "label": "Interactive Investor trade fee",
+        "type": "float",
+        "default": 3.99,
+        "unit": "gbp"
+      },
+      {
+        "key": "expected_hold_period_years",
+        "label": "Expected hold period",
+        "type": "float",
+        "default": 2.0,
+        "unit": "years"
+      },
+      {
+        "key": "spread_bps_by_friction_class",
+        "label": "Asset-class spread assumptions",
+        "type": "object",
+        "default": {
+          "conventional_gilts": 5.0,
+          "index_linked_gilts": 8.0,
+          "gilt_etfs": 3.0,
+          "corporate_bonds": 15.0,
+          "equities_and_investment_trusts": 10.0,
+          "cash_and_mmf": 0.0
+        }
+      }
+    ]
+  },
+  "v1_fixed_decisions": [
+    {
+      "id": "baseline_defined_at_bucket_level",
+      "decision": "The v1 strategic baseline is a bucket-weight vector, not a security-level target list.",
+      "reason": "The top-layer allocator is baseline-anchored, while sleeve modules decide security-level implementation."
+    },
+    {
+      "id": "policy_pack_excludes_user_specific_weights",
+      "decision": "The policy pack freezes the bucket schema and defaults but does not ship user-specific baseline weights.",
+      "reason": "The baseline remains user-authored and versioned separately from the shared v1 policy pack."
+    },
+    {
+      "id": "scenario_magnitude_scales_named_scenarios",
+      "decision": "Scenario magnitude is a scalar applied to the named scenario shock template.",
+      "reason": "The sidebar already expects both a scenario selector and a scenario magnitude control."
+    },
+    {
+      "id": "cash_and_mmf_share_liquidity_bucket",
+      "decision": "Free cash and MMF share the same liquidity-reserve bucket in v1.",
+      "reason": "The current persistence taxonomy has MMF but not a separate persisted cash asset_type."
+    },
+    {
+      "id": "unmodelled_holdings_remain_held_flat",
+      "decision": "Holdings without a credible scenario model remain in totals as held flat with an explicit model-status label.",
+      "reason": "This preserves portfolio totals without pretending to have scenario precision where the model does not."
+    },
+    {
+      "id": "friction_classes_are_not_policy_buckets",
+      "decision": "Friction routing classes such as gilt ETF and corporate bond stay separate from the bucket taxonomy.",
+      "reason": "The design already treats friction routing as metadata-derived rather than a widening of the core asset taxonomy."
+    }
+  ]
+}

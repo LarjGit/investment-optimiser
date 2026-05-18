@@ -126,6 +126,8 @@ The top layer works in portfolio weights:
 - `w_cur`: current live holdings weights
 - `w`: target post-trade weights
 
+The frozen v1 policy pack lives in `src/investment_optimiser/policy_pack_v1.json` and is described in `docs/policy-pack-v1.md`. Later slices should treat that artifact as the source of truth for the bucket taxonomy, named scenarios, default constraints, and shared assumption keys.
+
 Hard policy constraints include full investment, long-only positioning in v1, baseline tilt bands, regime-aware turnover limits, and adverse-scenario acceptability floors. Sleeve-local constraints include maturity caps, concentration caps, MMF or cash floors, and liquidity floors for the fixed-income sleeve.
 
 The objective is a deterministic attractiveness score rather than a claim to precise cross-asset expected returns. Confidence acts primarily by tightening tilt bands around baseline and secondarily by scaling sleeve scores. Current holdings matter for turnover, friction, and migration pacing, but they are not treated as the policy anchor.
@@ -410,6 +412,8 @@ The sidebar exposes the full active assumption set required by the system:
 - Asset-class spread assumptions
 
 Values live in `st.session_state` with explicit keys so all tabs read the same current assumptions.
+
+The canonical v1 field names and defaults for those sidebar assumptions are frozen in `src/investment_optimiser/policy_pack_v1.json` so allocator, scenario, and recommendation slices can consume the same schema.
 
 The sidebar also includes a `Refresh now` button. A successful refresh clears cached query results and reruns the app immediately.
 
