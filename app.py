@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import date
 import os
 from typing import Any
 
 import streamlit as st
 
 from investment_optimiser.db import initialize_database
+from investment_optimiser.portfolio_import import (
+    IngestionError,
+    import_ii_portfolio_snapshot,
+)
 
 
 st.set_page_config(
@@ -25,6 +30,8 @@ REFRESH_SOURCES = [
     "yfinance_equities",
 ]
 DEFAULT_DATABASE_URL = "sqlite:///data/investment_optimiser.db"
+PORTFOLIO_IMPORT_ERROR_KEY = "portfolio_import_error"
+PORTFOLIO_IMPORT_FEEDBACK_KEY = "portfolio_import_feedback"
 
 
 def get_database_url() -> str:
@@ -319,6 +326,59 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def render_import_panel(database_url: str) -> None:
+    st.markdown('<div class="panel-card">', unsafe_allow_html=True)
+    st.subheader("Portfolio Import")
+    st.write(
+        "Upload an Interactive Investor CSV to persist today's authoritative "
+        "portfolio snapshot into SQLite."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Interactive Investor CSV",
+        type="csv",
+        key="ii_csv_upload",
+    )
+    if st.button("Import Interactive Investor CSV", type="primary"):
+        if uploaded_file is None:
+            st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = "Choose a CSV file to import."
+        else:
+            try:
+                result = import_ii_portfolio_snapshot(
+                    database_url,
+                    uploaded_file,
+                    snapshot_date=date.today().isoformat(),
+                )
+            except IngestionError as exc:
+                st.session_state[PORTFOLIO_IMPORT_ERROR_KEY] = str(exc)
+                st.session_state.pop(PORTFOLIO_IMPORT_FEEDBACK_KEY, None)
+            else:
+                st.session_state[PORTFOLIO_IMPORT_FEEDBACK_KEY] = {
+                    "snapshot_date": result.snapshot_date,
+                    "imported_count": result.imported_count,
+                    "warning_messages": result.warning_messages,
+                }
+                st.session_state.pop(PORTFOLIO_IMPORT_ERROR_KEY, None)
+                st.cache_data.clear()
+                st.rerun()
+
+    import_error = st.session_state.get(PORTFOLIO_IMPORT_ERROR_KEY)
+    if import_error:
+        st.error(import_error)
+
+    import_feedback = st.session_state.get(PORTFOLIO_IMPORT_FEEDBACK_KEY)
+    if import_feedback:
+        st.success(
+            "Imported "
+            f"{import_feedback['imported_count']} holdings for "
+            f"{import_feedback['snapshot_date']}."
+        )
+        for warning_message in import_feedback["warning_messages"]:
+            st.warning(warning_message)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.markdown('<div class="panel-card">', unsafe_allow_html=True)
     st.subheader("Signals")
@@ -367,11 +427,12 @@ def render_decision_log_tab(state: dict[str, Any]) -> None:
 def main() -> None:
     database_url = get_database_url()
     schema_version = initialize_database(database_url)
+    apply_shell_styles()
+    render_import_panel(database_url)
     connection = st.connection("db", type="sql", url=database_url)
     state = read_shell_state(connection)
     summary = state["summary"]
 
-    apply_shell_styles()
     render_hero(schema_version, summary)
     render_signal_banners(state["active_signals"])
 

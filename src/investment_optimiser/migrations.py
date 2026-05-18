@@ -32,6 +32,7 @@ def create_initial_schema(connection: sqlite3.Connection) -> None:
             clean_price_gbp  REAL,
             market_value_gbp REAL NOT NULL,
             book_cost_gbp    REAL,
+            import_warning   TEXT,
             weight_pct       REAL NOT NULL,
             PRIMARY KEY (snapshot_date, symbol)
         ) STRICT, WITHOUT ROWID;
@@ -206,4 +207,20 @@ def create_initial_schema(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS: list[Migration] = [create_initial_schema]
+def add_portfolio_snapshot_import_warning(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(portfolio_snapshots)")
+    }
+    if "import_warning" in existing_columns:
+        return
+
+    connection.execute(
+        "ALTER TABLE portfolio_snapshots ADD COLUMN import_warning TEXT"
+    )
+
+
+MIGRATIONS: list[Migration] = [
+    create_initial_schema,
+    add_portfolio_snapshot_import_warning,
+]

@@ -5,6 +5,7 @@ description = "Local Streamlit dashboard for portfolio optimisation."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "pandas>=2.0",
     "sqlalchemy>=2.0",
     "streamlit>=1.45",
 ]
