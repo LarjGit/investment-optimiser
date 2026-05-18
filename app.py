@@ -14,6 +14,7 @@ from investment_optimiser.portfolio_import import (
     IngestionError,
     import_ii_portfolio_snapshot,
 )
+from investment_optimiser.boe import boe_handler
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 
 
@@ -520,7 +521,10 @@ def render_refresh_controls(
 
     if refresh_clicked:
         with st.spinner("Refreshing market data...", show_time=True):
-            coordinator = RefreshCoordinator(portfolio_csv_path=portfolio_csv_path)
+            coordinator = RefreshCoordinator(
+                portfolio_csv_path=portfolio_csv_path,
+                source_handlers={"boe": boe_handler},
+            )
             result = coordinator.run_refresh(
                 database_url,
                 snapshot_date=date.today().isoformat(),
