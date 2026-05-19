@@ -24,7 +24,7 @@ REFRESH_SOURCE_ORDER = (
     "blackrock_ftse_pe",
 )
 
-SourceHandler = Callable[[sqlite3.Connection], None]
+SourceHandler = Callable[[sqlite3.Connection], list[str] | None]
 _REFRESH_LOCK = threading.Lock()
 
 
@@ -73,8 +73,13 @@ class RefreshCoordinator:
             database_path = sqlite_path_from_url(database_url)
             active_sources = list(sources or REFRESH_SOURCE_ORDER)
             source_failures = 0
+            source_warning_messages: list[str] = []
             for source in active_sources:
-                if not self._run_source(database_path, source):
+                source_succeeded, warning_messages = self._run_source(
+                    database_path, source
+                )
+                source_warning_messages.extend(warning_messages)
+                if not source_succeeded:
                     source_failures += 1
         except Exception as exc:
             return RefreshResult(
@@ -91,7 +96,10 @@ class RefreshCoordinator:
                 source_failures,
                 include_portfolio_import=include_portfolio_import,
             ),
-            warning_messages=[] if import_result is None else import_result.warning_messages,
+            warning_messages=[
+                *([] if import_result is None else import_result.warning_messages),
+                *source_warning_messages,
+            ],
             imported_count=0 if import_result is None else import_result.imported_count,
             source_failures=source_failures,
         )
@@ -112,14 +120,14 @@ class RefreshCoordinator:
                 snapshot_date=snapshot_date,
             )
 
-    def _run_source(self, database_path: Path, source: str) -> bool:
+    def _run_source(self, database_path: Path, source: str) -> tuple[bool, list[str]]:
         handler = self._source_handlers.get(source, _not_implemented_handler(source))
 
         run_started_at = _utc_now()
         try:
             with _connect_writer(database_path) as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                handler(connection)
+                warning_messages = handler(connection) or []
                 _insert_refresh_log(
                     connection,
                     source=source,
@@ -128,7 +136,7 @@ class RefreshCoordinator:
                     error_message=None,
                 )
                 connection.commit()
-                return True
+                return True, warning_messages
         except Exception as exc:
             with _connect_writer(database_path) as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -140,7 +148,7 @@ class RefreshCoordinator:
                     error_message=str(exc),
                 )
                 connection.commit()
-            return False
+            return False, []
 
 
 def _connect_writer(database_path: Path) -> sqlite3.Connection:

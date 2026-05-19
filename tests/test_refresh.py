@@ -242,3 +242,30 @@ def test_refresh_logs_non_gilt_reference_source(
     assert refresh_rows == [
         ("non_gilt_reference", "completed", None),
     ]
+
+
+def test_refresh_returns_source_warning_messages_on_success(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    def lse_gilt_prices_handler(_connection: sqlite3.Connection) -> list[str]:
+        return ["BAD1 (GB00BAD00001) price refresh failed: 404 not found"]
+
+    coordinator = RefreshCoordinator(
+        source_handlers={"lse_gilt_prices": lse_gilt_prices_handler}
+    )
+
+    result = coordinator.run_refresh(
+        database_url,
+        snapshot_date="2026-05-19",
+        sources=["lse_gilt_prices"],
+        include_portfolio_import=False,
+    )
+
+    assert result.status == "completed"
+    assert result.warning_messages == [
+        "BAD1 (GB00BAD00001) price refresh failed: 404 not found"
+    ]
