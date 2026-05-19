@@ -4,7 +4,7 @@
 
 The investment-optimiser is a local decision-support tool for a UK SIPP portfolio of roughly GBP100k or more. It recommends how capital should be allocated across any SIPP-eligible asset class, including cash, MMFs, conventional gilts, index-linked gilts, ETFs, investment trusts, REITs, equities, funds, and other supported instruments. The engine is whole-portfolio, hierarchical, and anchored to a user-authored strategic baseline rather than current holdings. Current holdings are implementation state, not policy truth, so the system may recommend substantial reshaping when the evidence supports it.
 
-The application runs locally on Windows with Python, Streamlit, and SQLite. It ingests a manually updated Interactive Investor CSV, refreshes free public market data from the Bank of England, the DMO, the London Stock Exchange price-explorer API, Yahoo Finance, and the BlackRock UK ISF page, then persists portfolio, market, signal, and allocation state in SQLite. The dashboard is an on-demand read layer over persisted data, with scenario controls, friction assumptions, signal diagnostics, explanation tooling, change-attribution reporting, and an append-only decision log.
+The application runs locally on Windows with Python, Streamlit, and SQLite. It ingests a manually updated Interactive Investor CSV, refreshes free public market data from the Bank of England, the DMO, the London Stock Exchange price-explorer API, and Yahoo Finance, then persists portfolio, market, signal, and allocation state in SQLite. The dashboard is an on-demand read layer over persisted data, with scenario controls, friction assumptions, signal diagnostics, explanation tooling, change-attribution reporting, and an append-only decision log.
 
 The tool is recommendation-only. It does not automate trading. Signals surface opportunities and risk states; the friction model and final risk gate decide whether a trade is executable on realistic and policy-acceptable terms; the allocation engine produces an executable recommended portfolio rather than a frictionless paper target.
 
@@ -83,7 +83,7 @@ The data-source contract is:
 
 - Individual UK gilts: LSE price-explorer API
 - Non-gilt exchange-traded holdings: Yahoo Finance
-- FTSE 100 valuation input for the equity macro signal: BlackRock UK ISF HTML page
+- Global equity benchmark valuation input for the equity macro signal: Yahoo Finance (`SWRD.L` by default, user-configurable)
 - MMF running yield proxy: Bank of England base rate
 - Yield curve and base rate: Bank of England CSV API
 - Gilt metadata and coupon calendar: DMO XML plus LSE bridge
@@ -92,7 +92,7 @@ Yahoo Finance is explicitly not used for individual UK gilt pricing.
 
 ### Yahoo Finance Refresh
 
-Yahoo Finance covers equities, ETFs, investment trusts, REITs, listed funds, and other non-gilt exchange-traded symbols. The batch pattern is:
+Yahoo Finance covers equities, ETFs, investment trusts, REITs, listed funds, and other non-gilt exchange-traded symbols. It is also the source for the equity benchmark valuation used by the equity macro signal. The batch pattern is:
 
 ```python
 df = yf.download(
@@ -107,6 +107,8 @@ latest = df["Close"].iloc[-1]
 ```
 
 `period="2d"` is used to tolerate delayed exchange updates. After the batch, `yfinance.shared._ERRORS` is inspected so symbol-not-found cases, transient server failures, and silent all-null cases can be handled differently. Ticker-level failures do not create extra `refresh_log.status` values. A source run is `completed` if it still yields a usable daily snapshot, even when some symbols fall back to cached prices with warnings.
+
+After the price batch, a separate `yf.Ticker(benchmark_ticker).info` call fetches `trailingPE` for the configured equity benchmark. This is a single-ticker call appended to the same `yfinance_equities` source run and persisted to `equity_valuation_cache`. The benchmark ticker defaults to `SWRD.L` (SPDR MSCI World UCITS ETF, LSE-listed, tracks MSCI World developed-market index) and is configurable in `policy_pack_v1.json`. The iShares equivalent that many users hold (SWDA.L) tracks the same index but does not expose `trailingPE` via Yahoo Finance; SWRD.L is used as a valuation proxy instead.
 
 ### Refresh Entry Points and Staleness
 
@@ -259,13 +261,33 @@ Missing prices or failed GRY solves degrade gracefully with warnings instead of 
 
 ### Equity Macro Signal
 
-The equity macro signal compares trailing FTSE 100 earnings yield with the best conventional-gilt GRY. Its canonical valuation source is the BlackRock UK ISF product page:
+The equity macro signal answers the question: are global equities currently offering enough expected return to justify holding them over safe sovereign debt? It does this by comparing the earnings yield of a global equity benchmark against the best available conventional-gilt GRY — producing an Equity Risk Premium (ERP).
 
-- `https://www.blackrock.com/uk/individual/products/251795/ishares-core-ftse-100-ucits-etf`
+The signal is a regime indicator, not a trading trigger. It tells the allocator which direction makes sense for equity versus gilt tilts. It is not a market-timing tool.
 
-The parser extracts the dated `P/E Ratio` field from the public HTML and records both `pe_ratio` and `pe_as_of`. Earnings yield is then computed mechanically as `100 / pe_ratio`. The banner fires when the derived earnings yield is below the best conventional-gilt GRY.
+**Calculation:**
 
-Freshness is governed by the field's own `pe_as_of` date rather than only by fetch time. On live parse failure, a cached value may be reused for up to five trading days with a degraded-state warning. Beyond that, the equity macro banner is suppressed and the card remains visible with a stale or unavailable explanation.
+```text
+earnings_yield = 1 / trailingPE  (expressed as a percentage)
+ERP = earnings_yield - best_conventional_gilt_gry
+
+positive ERP: equities are compensating for risk relative to gilts
+negative ERP: gilts are offering more than global equity earnings yield
+```
+
+The banner fires when ERP falls below a configurable threshold (default 0%). The card remains visible and explains the current ERP whether the signal is firing or quiet.
+
+**Data source:**
+
+`trailingPE` is fetched from `yf.Ticker(benchmark_ticker).info` as part of the `yfinance_equities` refresh. The default benchmark is `SWRD.L` (SPDR MSCI World UCITS ETF), which tracks the MSCI World developed-market index and reliably exposes `trailingPE` via Yahoo Finance. The benchmark ticker is stored in `policy_pack_v1.json` and is user-configurable. The `trailingPE` figure is computed by Yahoo from the ETF's underlying holdings data and is typically updated weekly by the fund provider; it is a structural regime input, not an intraday observable.
+
+**Freshness:**
+
+There is no fund-provided `as-of` date in the Yahoo Finance response. Freshness is tracked by fetch date. A cached value may be reused for up to five trading days with a degraded-state warning. Beyond that, the equity macro banner is suppressed and the card remains visible with a stale or unavailable explanation.
+
+**Explainability:**
+
+When the signal state changes, the card surfaces which factor moved: gilt GRY rising, equity PE expanding or compressing, or both. This keeps the recommendation traceable to observable market conditions rather than opaque scoring.
 
 ### Yield-Curve Shape Signal
 
@@ -402,6 +424,8 @@ The sidebar exposes the full active assumption set required by the system:
 
 - Scenario selector and scenario magnitude
 - GRY improvement threshold
+- Equity risk premium threshold (ERP below which the equity macro banner fires; default 0%)
+- Equity benchmark ticker (default `SWRD.L`)
 - Duration floor and ceiling
 - `10y+` liquidity concentration threshold
 - Max maturity
@@ -503,7 +527,7 @@ The system persists eleven tables:
 
 `portfolio_snapshots` stores one row per `(snapshot_date, symbol)`. `signal_readings` stores one row per `(reading_date, signal_name, metric_name)`. `signal_events` stores one row per alert episode, not one row per daily evaluation. `decision_log` is append-only with a required structured `action` and optional `signal_event_id` link plus JSON `instruments_affected`.
 
-`yield_curve_cache` stores both named yield-curve points and the base rate. `gilt_price_cache` stores daily clean price, GRY, modified duration, coupon, maturity, and fetch timestamp for each successfully solved gilt. `equity_valuation_cache` stores dated FTSE 100 valuation inputs separately from trade-price caches because the equity signal depends on both `pe_ratio` and `pe_as_of`. `allocation_runs` stores the replayable optimiser audit payload as JSON-backed solve records with indexed scalar metadata columns for quick lookup.
+`yield_curve_cache` stores both named yield-curve points and the base rate. `gilt_price_cache` stores daily clean price, GRY, modified duration, coupon, maturity, and fetch timestamp for each successfully solved gilt. `equity_valuation_cache` stores the global equity benchmark `trailingPE` and derived `earnings_yield` by fetch date and `source_name`, keyed to the configured benchmark ticker. The equity signal uses this table to avoid refetching on every evaluation and to support the five-day stale fallback. `allocation_runs` stores the replayable optimiser audit payload as JSON-backed solve records with indexed scalar metadata columns for quick lookup.
 
 The only required foreign key in v1 is `decision_log.signal_event_id -> signal_events.id ON DELETE SET NULL`. Historical cache and snapshot tables do not point back to `gilt_reference`.
 
@@ -534,8 +558,7 @@ Remote sources are processed independently in this order:
 2. `dmo_reference`
 3. `lse_tidm_bridge` when needed by the reference refresh
 4. `lse_gilt_prices`
-5. `yfinance_equities`
-6. `blackrock_ftse_pe`
+5. `yfinance_equities` (includes price batch for portfolio holdings and the benchmark `trailingPE` fetch)
 
 Successful source writes and their `refresh_log(status='completed')` row commit atomically. Failed source writes roll back, then persist one standalone `refresh_log(status='failed')` row, and the coordinator continues to later sources. This preserves graceful degradation and same-day retry safety.
 
