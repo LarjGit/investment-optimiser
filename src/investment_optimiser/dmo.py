@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import re
 import sqlite3
 import urllib.request
@@ -65,10 +66,20 @@ def _parse_isodate(dt_str: str) -> str | None:
 def _fetch_xml() -> bytes:
     req = urllib.request.Request(
         _DMO_URL,
-        headers={"User-Agent": "investment-optimiser/1.0"},
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/xml,application/xml,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.9",
+            # DMO serves bot-challenge HTML when Accept-Encoding is absent;
+            # gzip signals a real browser and triggers the actual XML response.
+            "Accept-Encoding": "gzip, deflate",
+        },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+        raw = resp.read()
+    if raw[:2] == b"\x1f\x8b":
+        return gzip.decompress(raw)
+    return raw
 
 
 def _parse_rows(content: bytes) -> list[tuple]:
