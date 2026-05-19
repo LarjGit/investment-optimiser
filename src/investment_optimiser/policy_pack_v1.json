@@ -276,6 +276,19 @@
         "unit": "years"
       },
       {
+        "key": "benchmark_ticker",
+        "label": "Equity benchmark ticker",
+        "type": "string",
+        "default": "SWRD.L"
+      },
+      {
+        "key": "erp_threshold_pct",
+        "label": "ERP warning threshold",
+        "type": "float",
+        "default": 0.0,
+        "unit": "pct"
+      },
+      {
         "key": "spread_bps_by_friction_class",
         "label": "Asset-class spread assumptions",
         "type": "object",

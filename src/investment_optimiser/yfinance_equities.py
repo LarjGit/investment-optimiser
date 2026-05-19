@@ -5,6 +5,10 @@ import sqlite3
 
 import pandas as pd
 
+from investment_optimiser.policy_pack import load_policy_pack
+
+
+_DEFAULT_BENCHMARK_TICKER = "SWRD.L"
 
 NON_GILT_PRICE_ASSET_TYPES = (
     "equity",
@@ -76,6 +80,32 @@ def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
         """,
         rows_to_upsert,
     )
+
+    benchmark_ticker = _benchmark_ticker_from_policy()
+    pe_ratio = _fetch_benchmark_pe(benchmark_ticker)
+    if pe_ratio is not None:
+        connection.execute(
+            """
+            INSERT INTO equity_valuation_cache (
+                cache_date,
+                source_name,
+                pe_ratio,
+                pe_as_of,
+                fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cache_date, source_name) DO UPDATE SET
+                pe_ratio = excluded.pe_ratio,
+                pe_as_of = excluded.pe_as_of,
+                fetched_at = excluded.fetched_at
+            """,
+            (cache_date, "yfinance_equities", pe_ratio, cache_date, fetched_at),
+        )
+    else:
+        warning_messages.append(
+            f"{benchmark_ticker} trailingPE unavailable from Yahoo Finance; "
+            "equity_valuation_cache not updated."
+        )
+
     return warning_messages
 
 
@@ -208,6 +238,25 @@ def _coerce_int(value: object) -> int | None:
     if value is None or pd.isna(value):
         return None
     return int(value)
+
+
+def _benchmark_ticker_from_policy() -> str:
+    fields = load_policy_pack().get("shared_assumption_schema", {}).get("fields", [])
+    match = next((f for f in fields if f.get("key") == "benchmark_ticker"), None)
+    return str(match["default"]) if match else _DEFAULT_BENCHMARK_TICKER
+
+
+def _fetch_benchmark_pe(ticker: str) -> float | None:
+    try:
+        import yfinance as yf
+
+        info = yf.Ticker(ticker).info
+        val = info.get("trailingPE")
+        if val is None or not isinstance(val, (int, float)):
+            return None
+        return float(val)
+    except Exception:
+        return None
 
 
 def _utc_now() -> str:

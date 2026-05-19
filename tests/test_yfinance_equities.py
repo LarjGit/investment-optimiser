@@ -84,6 +84,10 @@ def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
         "investment_optimiser.yfinance_equities._fetch_quote_currency",
         lambda ticker: "GBp" if ticker == "REL.L" else "GBP",
     )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_benchmark_pe",
+        lambda _ticker: None,
+    )
 
     with sqlite3.connect(db_path) as connection:
         warning_messages = yfinance_equities_handler(connection)
@@ -100,4 +104,76 @@ def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
     ]
     assert warning_messages == [
         "VUAG.L price refresh failed: No price data found",
+        "SWRD.L trailingPE unavailable from Yahoo Finance; equity_valuation_cache not updated.",
     ]
+
+
+def test_yfinance_equities_handler_persists_benchmark_pe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-19",
+        holdings=[
+            Holding(
+                symbol="REL",
+                name="RELX PLC",
+                asset_type="equity",
+                qty=10.0,
+                clean_price_gbp=24.0,
+                market_value_gbp=240.0,
+                book_cost_gbp=200.0,
+            ),
+        ],
+    )
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return cls(2026, 5, 19)
+
+    price_frame = pd.DataFrame(
+        {
+            ("Close", "REL.L"): [24.62, 24.80],
+            ("Volume", "REL.L"): [1200, 1500],
+        },
+        index=pd.Index(
+            [pd.Timestamp("2026-05-18"), pd.Timestamp("2026-05-19")],
+            name="Date",
+        ),
+    )
+
+    monkeypatch.setattr("investment_optimiser.yfinance_equities.date", FakeDate)
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._download_price_frame",
+        lambda _tickers: price_frame,
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._download_errors",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_quote_currency",
+        lambda _ticker: "GBp",
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_benchmark_pe",
+        lambda _ticker: 26.5,
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        warning_messages = yfinance_equities_handler(connection)
+        valuation_rows = connection.execute(
+            """
+            SELECT cache_date, source_name, pe_ratio
+            FROM equity_valuation_cache
+            """
+        ).fetchall()
+
+    assert valuation_rows == [("2026-05-19", "yfinance_equities", 26.5)]
+    assert warning_messages == []

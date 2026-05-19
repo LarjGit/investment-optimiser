@@ -20,6 +20,8 @@ from investment_optimiser.portfolio_import import (
     IngestionError,
     import_ii_portfolio_snapshot,
 )
+from investment_optimiser.equity_signals import ErpSignal, evaluate_erp_signal
+from investment_optimiser.policy_pack import load_policy_pack
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -46,6 +48,15 @@ PORTFOLIO_UPLOAD_FEEDBACK_KEY = "portfolio_upload_feedback"
 REFRESH_FEEDBACK_KEY = "refresh_feedback"
 REFRESH_WARNING_MESSAGES_KEY = "refresh_warning_messages"
 PORTFOLIO_UPLOAD_WIDGET_KEY = "ii_csv_upload"
+ERP_THRESHOLD_KEY = "erp_threshold_pct"
+
+
+def _policy_field_default(key: str) -> object:
+    pack = load_policy_pack()
+    for field in pack.get("shared_assumption_schema", {}).get("fields", []):
+        if field.get("key") == key:
+            return field["default"]
+    return None
 
 
 def get_database_url() -> str:
@@ -215,6 +226,16 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """,
         ttl=60,
     )
+    equity_valuation_rows = connection.query(
+        """
+        SELECT cache_date, pe_ratio
+        FROM equity_valuation_cache
+        WHERE source_name = 'yfinance_equities'
+        ORDER BY cache_date DESC
+        LIMIT 1
+        """,
+        ttl=60,
+    )
 
     refresh_state: list[dict[str, str]] = []
     refresh_map = {
@@ -237,6 +258,14 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             )
         )
 
+    equity_valuation: dict | None = None
+    if not equity_valuation_rows.empty:
+        row = equity_valuation_rows.iloc[0]
+        equity_valuation = {
+            "cache_date": row["cache_date"],
+            "pe_ratio": row["pe_ratio"],
+        }
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -244,6 +273,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "decisions": decision_rows,
         "refresh_state": refresh_state,
         "gilt_ranking": gilt_ranking_rows,
+        "equity_valuation": equity_valuation,
     }
 
 
@@ -554,6 +584,22 @@ def render_sidebar(
             database_url=database_url,
             portfolio_csv_path=portfolio_csv_path,
         )
+        st.divider()
+        st.caption("Equity Signal")
+        benchmark_ticker = _policy_field_default("benchmark_ticker") or "SWRD.L"
+        st.caption(f"Benchmark: {benchmark_ticker}")
+        if ERP_THRESHOLD_KEY not in st.session_state:
+            st.session_state[ERP_THRESHOLD_KEY] = float(
+                _policy_field_default("erp_threshold_pct") or 0.0
+            )
+        st.number_input(
+            "ERP warning threshold (%)",
+            min_value=-5.0,
+            max_value=5.0,
+            step=0.25,
+            key=ERP_THRESHOLD_KEY,
+            help="ERP below this level triggers the warning banner.",
+        )
 
 
 def render_portfolio_tab(state: dict[str, Any]) -> None:
@@ -679,9 +725,65 @@ def render_gilt_ranking_card(df: pd.DataFrame) -> None:
     st.caption("Ranked by GRY descending. Interactive re-sorting may reorder rows with missing analytics.")
 
 
+def render_equity_macro_signal_card(
+    equity_valuation: dict | None,
+    gilt_ranking: pd.DataFrame,
+    erp_threshold_pct: float,
+) -> None:
+    st.subheader("Equity Risk Premium Signal")
+
+    pe_ratio: float | None = None
+    cache_date: str | None = None
+    if equity_valuation is not None:
+        pe_ratio = equity_valuation.get("pe_ratio")
+        cache_date = equity_valuation.get("cache_date")
+
+    best_gry: float | None = None
+    if not gilt_ranking.empty and "gry_pct" in gilt_ranking.columns:
+        gry_series = gilt_ranking["gry_pct"].dropna()
+        if not gry_series.empty:
+            best_gry = float(gry_series.max())
+
+    signal = evaluate_erp_signal(
+        pe_ratio=pe_ratio,
+        best_gry=best_gry,
+        cache_date=cache_date,
+        erp_threshold_pct=erp_threshold_pct,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    if signal.state == "unavailable":
+        col1.metric("ERP", "—")
+        col2.metric("Earnings yield", "—")
+        col3.metric("Best gilt GRY", f"{best_gry * 100:.2f}%" if best_gry is not None else "—")
+        st.error(signal.explanation)
+        return
+
+    col1.metric(
+        "ERP",
+        f"{signal.erp_pct:+.2f}%",
+        delta=f"{signal.erp_pct - erp_threshold_pct:+.2f}% vs threshold",
+        delta_color="normal",
+    )
+    col2.metric("Earnings yield", f"{signal.earnings_yield_pct:.2f}%")
+    col3.metric("Best gilt GRY", f"{signal.best_gilt_gry_pct:.2f}%")
+
+    if signal.state in ("stale", "warning"):
+        st.warning(signal.explanation)
+    else:
+        st.info(signal.explanation)
+
+
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.subheader("Signals")
     render_gilt_ranking_card(state["gilt_ranking"])
+    st.divider()
+    erp_threshold_pct = float(st.session_state.get(ERP_THRESHOLD_KEY, 0.0))
+    render_equity_macro_signal_card(
+        equity_valuation=state.get("equity_valuation"),
+        gilt_ranking=state["gilt_ranking"],
+        erp_threshold_pct=erp_threshold_pct,
+    )
     st.divider()
     active_signal_count = int(state["summary"]["active_signal_count"] or 0)
     st.write(

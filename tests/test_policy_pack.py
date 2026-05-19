@@ -34,6 +34,8 @@ def test_load_policy_pack_v1_exposes_frozen_contract() -> None:
         "interactive_investor_trade_fee_gbp",
         "expected_hold_period_years",
         "spread_bps_by_friction_class",
+        "benchmark_ticker",
+        "erp_threshold_pct",
     }
 
 
