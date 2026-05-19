@@ -28,6 +28,7 @@ def test_calculate_portfolio_kpis_uses_persisted_holdings_values(tmp_path: Path)
     kpis = calculate_portfolio_kpis(database_url)
 
     assert kpis.snapshot_date == "2026-05-18"
-    assert kpis.total_value_gbp == pytest.approx(10162.0)
+    assert kpis.current_total_value_gbp == pytest.approx(10162.0)
+    assert kpis.snapshot_total_value_gbp == pytest.approx(10162.0)
     assert kpis.holding_count == 2
     assert kpis.mmf_weight_pct == pytest.approx(250.0 / 10162.0 * 100)

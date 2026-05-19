@@ -22,6 +22,11 @@ from investment_optimiser.portfolio_import import (
 )
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
+from investment_optimiser.yfinance_equities import (
+    NON_GILT_PRICE_ASSET_TYPES,
+    to_yahoo_ticker,
+    yfinance_equities_handler,
+)
 
 
 st.set_page_config(
@@ -32,7 +37,9 @@ st.set_page_config(
 )
 
 
-REFRESH_SOURCES = list(REFRESH_SOURCE_ORDER)
+REFRESH_SOURCES = [
+    source for source in REFRESH_SOURCE_ORDER if source != "blackrock_ftse_pe"
+]
 DEFAULT_DATABASE_URL = "sqlite:///data/investment_optimiser.db"
 PORTFOLIO_UPLOAD_ERROR_KEY = "portfolio_upload_error"
 PORTFOLIO_UPLOAD_FEEDBACK_KEY = "portfolio_upload_feedback"
@@ -165,6 +172,10 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """,
         ttl=60,
     )
+    holdings_rows = enrich_holdings_with_latest_non_gilt_prices(
+        connection,
+        holdings_rows,
+    )
     decision_rows = connection.query(
         """
         SELECT decision_date, action, notes, created_at
@@ -234,6 +245,80 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "refresh_state": refresh_state,
         "gilt_ranking": gilt_ranking_rows,
     }
+
+
+def enrich_holdings_with_latest_non_gilt_prices(
+    connection: Any,
+    holdings_rows: pd.DataFrame,
+) -> pd.DataFrame:
+    if holdings_rows.empty:
+        return holdings_rows
+
+    holdings_frame = holdings_rows.copy()
+
+    non_gilt_mask = holdings_frame["asset_type"].isin(NON_GILT_PRICE_ASSET_TYPES)
+    if not non_gilt_mask.any():
+        return _add_empty_refreshed_price_columns(holdings_frame)
+
+    latest_price_rows = connection.query(
+        """
+        WITH ranked_prices AS (
+            SELECT
+                ticker,
+                cache_date,
+                close_price_gbp,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ticker
+                    ORDER BY cache_date DESC, fetched_at DESC
+                ) AS row_number
+            FROM equity_price_cache
+        )
+        SELECT ticker, cache_date, close_price_gbp
+        FROM ranked_prices
+        WHERE row_number = 1
+        """,
+        ttl=60,
+    )
+    if latest_price_rows.empty:
+        return _add_empty_refreshed_price_columns(holdings_frame)
+
+    holdings_frame["yahoo_ticker"] = None
+    holdings_frame.loc[non_gilt_mask, "yahoo_ticker"] = holdings_frame.loc[
+        non_gilt_mask, "symbol"
+    ].map(to_yahoo_ticker)
+
+    enriched_frame = holdings_frame.merge(
+        latest_price_rows.rename(
+            columns={
+                "ticker": "yahoo_ticker",
+                "cache_date": "refreshed_price_date",
+                "close_price_gbp": "refreshed_price_gbp",
+            }
+        ),
+        on="yahoo_ticker",
+        how="left",
+    )
+    enriched_frame["refreshed_market_value_gbp"] = (
+        enriched_frame["refreshed_price_gbp"] * enriched_frame["quantity"]
+    )
+    for column_name in (
+        "refreshed_price_gbp",
+        "refreshed_market_value_gbp",
+        "refreshed_price_date",
+    ):
+        enriched_frame[column_name] = enriched_frame[column_name].where(
+            pd.notna(enriched_frame[column_name]),
+            None,
+        )
+
+    return enriched_frame.drop(columns=["yahoo_ticker"], errors="ignore")
+
+
+def _add_empty_refreshed_price_columns(holdings_frame: pd.DataFrame) -> pd.DataFrame:
+    holdings_frame["refreshed_price_gbp"] = None
+    holdings_frame["refreshed_market_value_gbp"] = None
+    holdings_frame["refreshed_price_date"] = None
+    return holdings_frame
 
 
 def metric_note(value: Any) -> str:
@@ -382,11 +467,13 @@ def render_refresh_controls(
                     "non_gilt_reference": non_gilt_reference_handler,
                     "lse_gilt_prices": lse_gilt_prices_handler,
                     "gilt_analytics": gilt_analytics_handler,
+                    "yfinance_equities": yfinance_equities_handler,
                 },
             )
             result = coordinator.run_refresh(
                 database_url,
                 snapshot_date=date.today().isoformat(),
+                sources=REFRESH_SOURCES,
                 include_portfolio_import=False,
             )
         st.session_state[REFRESH_FEEDBACK_KEY] = {
@@ -485,29 +572,40 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
         st.subheader("Portfolio State")
     with snapshot_column:
         st.caption(f"Latest snapshot: {latest_snapshot}")
+    st.caption(
+        "Snapshot values come from the imported broker CSV. Refreshed non-gilt prices "
+        "and values are overlaid from the persisted Yahoo cache when available."
+    )
 
     portfolio_kpis = build_portfolio_kpis(
         holdings_frame.to_dict("records"),
         summary["latest_snapshot_date"],
     )
-    metric_columns = st.columns(3)
+    metric_columns = st.columns(4)
     metric_columns[0].metric(
-        "Total Portfolio Value",
-        f"GBP {portfolio_kpis.total_value_gbp:,.0f}",
+        "Current Portfolio Value",
+        f"GBP {portfolio_kpis.current_total_value_gbp:,.0f}",
         border=False,
     )
     metric_columns[1].metric(
+        "Snapshot Portfolio Value",
+        f"GBP {portfolio_kpis.snapshot_total_value_gbp:,.0f}",
+        border=False,
+    )
+    metric_columns[2].metric(
         "Holdings",
         str(portfolio_kpis.holding_count),
         border=False,
     )
-    metric_columns[2].metric(
+    metric_columns[3].metric(
         "Cash & MMF Share",
         f"{portfolio_kpis.mmf_weight_pct:.1f}%",
         border=False,
     )
 
-    display_frame = holdings_frame.drop(columns=["snapshot_date"], errors="ignore")
+    display_frame = holdings_frame.drop(
+        columns=["snapshot_date", "refreshed_price_gbp"], errors="ignore"
+    )
     st.dataframe(
         display_frame,
         width="stretch",
@@ -518,8 +616,10 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
             "instrument_name": st.column_config.TextColumn("Name"),
             "asset_type": st.column_config.TextColumn("Type"),
             "quantity": st.column_config.NumberColumn("Quantity", format="%,.2f"),
-            "market_value_gbp": st.column_config.NumberColumn("Market Value", format="£%,.2f"),
+            "market_value_gbp": st.column_config.NumberColumn("Snapshot Value", format="£%,.2f"),
             "weight_pct": st.column_config.NumberColumn("Weight %", format="%.2f%%"),
+            "refreshed_price_date": st.column_config.TextColumn("Refresh Date"),
+            "refreshed_market_value_gbp": st.column_config.NumberColumn("Current Value", format="£%,.2f"),
         },
     )
 

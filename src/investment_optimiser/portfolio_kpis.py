@@ -11,7 +11,8 @@ from investment_optimiser.db import sqlite_path_from_url
 @dataclass(frozen=True)
 class PortfolioKpis:
     snapshot_date: str | None
-    total_value_gbp: float
+    current_total_value_gbp: float
+    snapshot_total_value_gbp: float
     holding_count: int
     mmf_weight_pct: float
 
@@ -20,20 +21,27 @@ def build_portfolio_kpis(
     holdings_rows: Iterable[Mapping[str, Any]],
     snapshot_date: str | None,
 ) -> PortfolioKpis:
-    total_value_gbp = 0.0
+    current_total_value_gbp = 0.0
+    snapshot_total_value_gbp = 0.0
     holding_count = 0
     mmf_value_gbp = 0.0
 
     for row in holdings_rows:
-        market_value_gbp = float(row["market_value_gbp"] or 0.0)
-        total_value_gbp += market_value_gbp
+        snapshot_market_value_gbp = float(row["market_value_gbp"] or 0.0)
+        current_market_value_gbp = _row_current_market_value_gbp(
+            row,
+            snapshot_market_value_gbp=snapshot_market_value_gbp,
+        )
+        snapshot_total_value_gbp += snapshot_market_value_gbp
+        current_total_value_gbp += current_market_value_gbp
         holding_count += 1
         if row["asset_type"] == "mmf":
-            mmf_value_gbp += market_value_gbp
+            mmf_value_gbp += current_market_value_gbp
 
     return _build_aggregate_portfolio_kpis(
         snapshot_date=snapshot_date,
-        total_value_gbp=total_value_gbp,
+        current_total_value_gbp=current_total_value_gbp,
+        snapshot_total_value_gbp=snapshot_total_value_gbp,
         holding_count=holding_count,
         mmf_value_gbp=mmf_value_gbp,
     )
@@ -70,7 +78,8 @@ def calculate_portfolio_kpis(database_url: str) -> PortfolioKpis:
 
     return _build_aggregate_portfolio_kpis(
         snapshot_date=row[0],
-        total_value_gbp=float(row[2] or 0.0),
+        current_total_value_gbp=float(row[2] or 0.0),
+        snapshot_total_value_gbp=float(row[2] or 0.0),
         holding_count=int(row[1] or 0),
         mmf_value_gbp=float(row[3] or 0.0),
     )
@@ -78,16 +87,33 @@ def calculate_portfolio_kpis(database_url: str) -> PortfolioKpis:
 
 def _build_aggregate_portfolio_kpis(
     snapshot_date: str | None,
-    total_value_gbp: float,
+    current_total_value_gbp: float,
+    snapshot_total_value_gbp: float,
     holding_count: int,
     mmf_value_gbp: float,
 ) -> PortfolioKpis:
     return PortfolioKpis(
         snapshot_date=snapshot_date,
-        total_value_gbp=total_value_gbp,
+        current_total_value_gbp=current_total_value_gbp,
+        snapshot_total_value_gbp=snapshot_total_value_gbp,
         holding_count=holding_count,
-        mmf_weight_pct=_weight_pct(mmf_value_gbp, total_value_gbp),
+        mmf_weight_pct=_weight_pct(mmf_value_gbp, current_total_value_gbp),
     )
+
+
+def _row_current_market_value_gbp(
+    row: Mapping[str, Any],
+    *,
+    snapshot_market_value_gbp: float,
+) -> float:
+    refreshed_market_value_gbp = row.get("refreshed_market_value_gbp")
+    if _is_missing(refreshed_market_value_gbp):
+        return snapshot_market_value_gbp
+    return float(refreshed_market_value_gbp)
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value != value
 
 
 def _weight_pct(part_value_gbp: float, total_value_gbp: float) -> float:

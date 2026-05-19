@@ -2,6 +2,7 @@ from datetime import date
 from pathlib import Path
 import sqlite3
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from investment_optimiser.db import initialize_database
@@ -153,9 +154,81 @@ def test_portfolio_tab_renders_kpis_from_latest_persisted_snapshot(tmp_path: Pat
         metric.label: metric.value
         for metric in app.metric
     }
-    assert portfolio_metrics["Total Portfolio Value"] == "GBP 10,162"
+    assert portfolio_metrics["Current Portfolio Value"] == "GBP 10,162"
+    assert portfolio_metrics["Snapshot Portfolio Value"] == "GBP 10,162"
     assert portfolio_metrics["Holdings"] == "2"
     assert portfolio_metrics["Cash & MMF Share"] == "2.5%"
+
+
+def test_portfolio_tab_reads_persisted_non_gilt_prices_from_equity_cache(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-19",
+        holdings=[
+            Holding(
+                symbol="REL",
+                name="RELX PLC",
+                asset_type="equity",
+                qty=10.0,
+                clean_price_gbp=24.0,
+                market_value_gbp=240.0,
+                book_cost_gbp=200.0,
+            ),
+            Holding(
+                symbol="CSH2",
+                name="Royal London Short Term Money Market",
+                asset_type="mmf",
+                qty=250.0,
+                clean_price_gbp=1.0,
+                market_value_gbp=250.0,
+                book_cost_gbp=250.0,
+            ),
+        ],
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO equity_price_cache (
+                cache_date,
+                ticker,
+                close_price_gbp,
+                volume,
+                fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("2026-05-19", "REL.L", 24.80, 1500, "2026-05-19T09:00:00Z"),
+        )
+        connection.commit()
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {"db": {"url": database_url}}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    portfolio_metrics = {
+        metric.label: metric.value
+        for metric in app.metric
+    }
+    holdings_frame = app.dataframe[0].value
+    rel_row = holdings_frame.loc[holdings_frame["symbol"] == "REL"].iloc[0]
+    mmf_row = holdings_frame.loc[holdings_frame["symbol"] == "CSH2"].iloc[0]
+
+    assert portfolio_metrics["Current Portfolio Value"] == "GBP 498"
+    assert portfolio_metrics["Snapshot Portfolio Value"] == "GBP 490"
+    assert portfolio_metrics["Cash & MMF Share"] == "50.2%"
+    assert "refreshed_price_gbp" not in holdings_frame.columns
+    assert rel_row["refreshed_market_value_gbp"] == 248.0
+    assert rel_row["refreshed_price_date"] == "2026-05-19"
+    assert pd.isna(mmf_row["refreshed_market_value_gbp"])
 
 
 def test_signals_tab_renders_gilt_ranking_with_seeded_analytics(tmp_path: Path) -> None:
