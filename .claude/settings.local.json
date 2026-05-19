@@ -15,7 +15,9 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:docs.scipy.org)",
       "Bash(uv run *)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
