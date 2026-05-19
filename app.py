@@ -11,6 +11,7 @@ import streamlit as st
 from investment_optimiser.boe import boe_handler
 from investment_optimiser.db import initialize_database, sqlite_path_from_url
 from investment_optimiser.dmo import dmo_handler
+from investment_optimiser.gilt_analytics import gilt_analytics_handler
 from investment_optimiser.lse_gilt_prices import lse_gilt_prices_handler
 from investment_optimiser.non_gilt_reference import non_gilt_reference_handler
 from investment_optimiser.tidm import tidm_handler
@@ -360,6 +361,7 @@ def render_refresh_controls(
                     "lse_tidm_bridge": tidm_handler,
                     "non_gilt_reference": non_gilt_reference_handler,
                     "lse_gilt_prices": lse_gilt_prices_handler,
+                    "gilt_analytics": gilt_analytics_handler,
                 },
             )
             result = coordinator.run_refresh(

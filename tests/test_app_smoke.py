@@ -41,7 +41,7 @@ def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert user_version == 5
+    assert user_version == 6
     assert journal_mode.lower() == "wal"
     assert {
         "portfolio_snapshots",

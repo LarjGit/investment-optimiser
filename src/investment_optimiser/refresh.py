@@ -20,6 +20,7 @@ REFRESH_SOURCE_ORDER = (
     "lse_tidm_bridge",
     "non_gilt_reference",
     "lse_gilt_prices",
+    "gilt_analytics",
     "yfinance_equities",
     "blackrock_ftse_pe",
 )
