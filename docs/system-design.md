@@ -167,6 +167,8 @@ Settlement is `T+1` using England and Wales bank holidays. Coupon schedules are 
 
 `compute_gry(clean_price_per_100, coupon_pct, maturity_date, settlement_date)` returns both annual GRY and modified duration. The primary solve path uses Newton; `brentq` is the fallback. Failed solves are omitted from `gilt_price_cache` and surfaced as warnings rather than persisted as null analytics.
 
+Index-linked gilt real GRY is a separate calculation built in a dedicated slice after the shared GRY engine. The real yield solve uses the same Newton/brentq path but with the redemption cash flow uplifted by the projected index ratio derived from the user-supplied RPI assumption. The nominal-equivalent yield is then computed from the real yield using the Fisher equation. The RPI assumption is a sidebar input that is added to the session state and frozen as a named field in `policy_pack_v1.json` in the same slice. Until that slice is built, IL gilts are priced and held in the portfolio but excluded from yield ranking, switch logic, and the LP candidate universe.
+
 ### Sleeve Contract and Fallbacks
 
 Each sleeve must return:
