@@ -149,6 +149,7 @@ def create_initial_schema(connection: sqlite3.Connection) -> None:
                     'blackrock_ftse_pe',
                     'lse_gilt_prices',
                     'lse_tidm_bridge',
+                    'non_gilt_reference',
                     'yfinance_equities'
                 )
             ),
@@ -220,7 +221,95 @@ def add_portfolio_snapshot_import_warning(connection: sqlite3.Connection) -> Non
     )
 
 
+def create_non_gilt_reference_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS non_gilt_reference (
+            symbol          TEXT PRIMARY KEY,
+            instrument_name TEXT NOT NULL,
+            asset_type      TEXT NOT NULL CHECK (
+                asset_type IN (
+                    'equity',
+                    'etf',
+                    'investment_trust',
+                    'reit',
+                    'fund',
+                    'other'
+                )
+            ),
+            source_name     TEXT NOT NULL,
+            source_label    TEXT NOT NULL,
+            last_updated    TEXT NOT NULL
+        ) STRICT, WITHOUT ROWID
+        """
+    )
+
+
+def add_non_gilt_reference_refresh_source(connection: sqlite3.Connection) -> None:
+    refresh_log_sql = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'refresh_log'
+        """
+    ).fetchone()
+    if refresh_log_sql and "non_gilt_reference" in (refresh_log_sql[0] or ""):
+        return
+
+    connection.execute("ALTER TABLE refresh_log RENAME TO refresh_log_old")
+    connection.executescript(
+        """
+        CREATE TABLE refresh_log (
+            id             INTEGER PRIMARY KEY,
+            source         TEXT NOT NULL CHECK (
+                source IN (
+                    'boe',
+                    'dmo_reference',
+                    'blackrock_ftse_pe',
+                    'lse_gilt_prices',
+                    'lse_tidm_bridge',
+                    'non_gilt_reference',
+                    'yfinance_equities'
+                )
+            ),
+            run_started_at TEXT NOT NULL,
+            finished_at    TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+            error_msg      TEXT
+        ) STRICT;
+
+        INSERT INTO refresh_log (
+            id,
+            source,
+            run_started_at,
+            finished_at,
+            status,
+            error_msg
+        )
+        SELECT
+            id,
+            source,
+            run_started_at,
+            finished_at,
+            status,
+            error_msg
+        FROM refresh_log_old;
+
+        DROP TABLE refresh_log_old;
+
+        CREATE INDEX IF NOT EXISTS ix_refresh_log_source_finished
+        ON refresh_log(source, finished_at DESC);
+
+        CREATE INDEX IF NOT EXISTS ix_refresh_log_source_success
+        ON refresh_log(source, finished_at DESC)
+        WHERE status = 'completed';
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
+    create_non_gilt_reference_table,
+    add_non_gilt_reference_refresh_source,
 ]

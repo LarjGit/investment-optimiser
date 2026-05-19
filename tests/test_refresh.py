@@ -187,3 +187,58 @@ def test_refresh_market_data_does_not_import_portfolio_snapshot(
 
     assert result.status == "completed"
     assert holdings == []
+
+
+def test_refresh_logs_non_gilt_reference_source(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    def non_gilt_handler(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT INTO non_gilt_reference (
+                symbol,
+                instrument_name,
+                asset_type,
+                source_name,
+                source_label,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "REL",
+                "RELX PLC",
+                "equity",
+                "lse_company_page",
+                "Equity shares (commercial companies)",
+                "2026-05-19T09:00:00Z",
+            ),
+        )
+
+    coordinator = RefreshCoordinator(
+        source_handlers={"non_gilt_reference": non_gilt_handler}
+    )
+
+    result = coordinator.run_refresh(
+        database_url,
+        snapshot_date="2026-05-19",
+        sources=["non_gilt_reference"],
+        include_portfolio_import=False,
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        refresh_rows = connection.execute(
+            """
+            SELECT source, status, error_msg
+            FROM refresh_log
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+    assert result.status == "completed"
+    assert refresh_rows == [
+        ("non_gilt_reference", "completed", None),
+    ]

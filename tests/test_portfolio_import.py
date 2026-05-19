@@ -245,6 +245,66 @@ def test_import_ii_portfolio_snapshot_classifies_assets_and_persists_warnings(
     ]
 
 
+def test_import_ii_portfolio_snapshot_classifies_non_gilt_symbols_from_reference_data(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "portfolio_snapshots.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO non_gilt_reference (
+                symbol,
+                instrument_name,
+                asset_type,
+                source_name,
+                source_label,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "REL",
+                "RELX PLC",
+                "equity",
+                "lse_company_page",
+                "Equity shares (commercial companies)",
+                "2026-05-19T09:00:00Z",
+            ),
+        )
+
+    uploaded_csv = BytesIO(
+        (
+            "Symbol,Name,Quantity,Price,Value,Book Cost\n"
+            "REL,RELX PLC,10,24.62,246.20,200.00\n"
+        ).encode("utf-8")
+    )
+
+    result = import_ii_portfolio_snapshot(
+        database_url,
+        uploaded_csv,
+        snapshot_date="2026-05-18",
+    )
+
+    assert result.warning_messages == []
+    assert fetch_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-18",
+    ) == [
+        Holding(
+            symbol="REL",
+            name="RELX PLC",
+            asset_type="equity",
+            qty=10.0,
+            clean_price_gbp=24.62,
+            market_value_gbp=246.2,
+            book_cost_gbp=200.0,
+            import_warning=None,
+        )
+    ]
+
+
 def test_load_ii_holdings_accepts_real_ii_headers_and_currency_formats() -> None:
     uploaded_csv = BytesIO(
         (

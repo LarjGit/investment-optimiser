@@ -18,6 +18,7 @@ REFRESH_SOURCE_ORDER = (
     "boe",
     "dmo_reference",
     "lse_tidm_bridge",
+    "non_gilt_reference",
     "lse_gilt_prices",
     "yfinance_equities",
     "blackrock_ftse_pe",

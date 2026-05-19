@@ -71,6 +71,11 @@ class _GiltReference:
     instrument_type: str
 
 
+@dataclass(frozen=True)
+class _NonGiltReference:
+    asset_type: str
+
+
 ASSET_TYPE_OVERRIDES: dict[str, str] = {}
 NON_GILT_SYMBOL_TO_ASSET_TYPE = {
     "VUAG": "etf",
@@ -93,10 +98,15 @@ def load_ii_holdings(
 ) -> list[Holding]:
     frame = _load_ii_frame(uploaded_file)
     gilt_reference_by_tidm = _fetch_gilt_reference_by_tidm(database_url)
+    non_gilt_reference_by_symbol = _fetch_non_gilt_reference_by_symbol(database_url)
 
     return [
         persisted_holding.holding
-        for persisted_holding in _normalize_holdings(frame, gilt_reference_by_tidm)
+        for persisted_holding in _normalize_holdings(
+            frame,
+            gilt_reference_by_tidm,
+            non_gilt_reference_by_symbol,
+        )
     ]
 
 
@@ -235,8 +245,13 @@ def _load_persisted_holdings(
 ) -> list[_PersistedHolding]:
     frame = _load_ii_frame(uploaded_file)
     gilt_reference_by_tidm = _fetch_gilt_reference_by_tidm(database_url)
+    non_gilt_reference_by_symbol = _fetch_non_gilt_reference_by_symbol(database_url)
 
-    return _normalize_holdings(frame, gilt_reference_by_tidm)
+    return _normalize_holdings(
+        frame,
+        gilt_reference_by_tidm,
+        non_gilt_reference_by_symbol,
+    )
 
 
 def _load_ii_frame(uploaded_file: BinaryIO) -> pd.DataFrame:
@@ -258,12 +273,19 @@ def _load_ii_frame(uploaded_file: BinaryIO) -> pd.DataFrame:
 def _normalize_holdings(
     frame: pd.DataFrame,
     gilt_reference_by_tidm: dict[str, _GiltReference],
+    non_gilt_reference_by_symbol: dict[str, _NonGiltReference],
 ) -> list[_PersistedHolding]:
     persisted_holdings: list[_PersistedHolding] = []
     for _, row in frame.iterrows():
         if _is_totals_row(row):
             continue
-        persisted_holdings.append(_normalize_holding(row, gilt_reference_by_tidm))
+        persisted_holdings.append(
+            _normalize_holding(
+                row,
+                gilt_reference_by_tidm,
+                non_gilt_reference_by_symbol,
+            )
+        )
 
     return persisted_holdings
 
@@ -271,6 +293,7 @@ def _normalize_holdings(
 def _normalize_holding(
     row: pd.Series,
     gilt_reference_by_tidm: dict[str, _GiltReference],
+    non_gilt_reference_by_symbol: dict[str, _NonGiltReference],
 ) -> _PersistedHolding:
     symbol = str(row["symbol"]).strip()
     name = str(row["name"]).strip()
@@ -279,7 +302,12 @@ def _normalize_holding(
     warnings: list[str] = []
     if clean_price_gbp is None and raw_price:
         warnings.append(f"Price could not be parsed from {raw_price!r}.")
-    classified_asset = _classify_asset_type(symbol, name, gilt_reference_by_tidm)
+    classified_asset = _classify_asset_type(
+        symbol,
+        name,
+        gilt_reference_by_tidm,
+        non_gilt_reference_by_symbol,
+    )
     if classified_asset.warning:
         warnings.append(classified_asset.warning)
 
@@ -302,6 +330,7 @@ def _classify_asset_type(
     symbol: str,
     name: str,
     gilt_reference_by_tidm: dict[str, _GiltReference],
+    non_gilt_reference_by_symbol: dict[str, _NonGiltReference],
 ) -> _ClassifiedAsset:
     normalized_symbol = symbol.strip().upper()
     normalized_name = name.lower()
@@ -328,6 +357,10 @@ def _classify_asset_type(
             asset_type="gilt_index_linked",
             isin=gilt_reference.isin,
         )
+
+    non_gilt_reference = non_gilt_reference_by_symbol.get(normalized_symbol)
+    if non_gilt_reference is not None:
+        return _ClassifiedAsset(asset_type=non_gilt_reference.asset_type)
 
     mapped_asset_type = NON_GILT_SYMBOL_TO_ASSET_TYPE.get(normalized_symbol)
     if mapped_asset_type is not None:
@@ -431,6 +464,27 @@ def _fetch_gilt_reference_by_tidm(
     return {
         tidm: _GiltReference(isin=isin, instrument_type=instrument_type)
         for tidm, isin, instrument_type in rows
+    }
+
+
+def _fetch_non_gilt_reference_by_symbol(
+    database_url: str | None,
+) -> dict[str, _NonGiltReference]:
+    if database_url is None:
+        return {}
+
+    database_path = sqlite_path_from_url(database_url)
+    with _connect_database(database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT symbol, asset_type
+            FROM non_gilt_reference
+            """
+        ).fetchall()
+
+    return {
+        symbol: _NonGiltReference(asset_type=asset_type)
+        for symbol, asset_type in rows
     }
 
 
