@@ -158,6 +158,43 @@ def test_portfolio_tab_renders_kpis_from_latest_persisted_snapshot(tmp_path: Pat
     assert portfolio_metrics["Cash & MMF Share"] == "2.5%"
 
 
+def test_signals_tab_renders_gilt_ranking_with_seeded_analytics(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO gilt_reference (
+                isin, instrument_name, coupon_pct, maturity_date,
+                dividend_months, dividend_day, instrument_type, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("GB00B54HL0K3", "Treasury 4% 2031", 4.0, "2031-06-07",
+             "Jun,Dec", 7, "Conventional", "2026-05-19T08:00:00Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO gilt_price_cache (
+                cache_date, isin, clean_price_gbp, gry_pct, modified_duration_years,
+                coupon_pct, maturity_date, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-05-19", "GB00B54HL0K3", 98.50, 0.0435, 4.2,
+             4.0, "2031-06-07", "2026-05-19T08:00:00Z"),
+        )
+        connection.commit()
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {"db": {"url": database_url}}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+
+
 def test_portfolio_tab_shows_last_successful_market_refresh_after_failure(
     tmp_path: Path,
 ) -> None:

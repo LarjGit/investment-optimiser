@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 from investment_optimiser.boe import boe_handler
@@ -185,6 +186,24 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """,
         ttl=60,
     )
+    gilt_ranking_rows = connection.query(
+        """
+        SELECT
+            p.isin,
+            r.instrument_name,
+            p.maturity_date,
+            p.coupon_pct,
+            p.clean_price_gbp,
+            p.gry_pct,
+            p.modified_duration_years
+        FROM gilt_price_cache p
+        JOIN gilt_reference r ON r.isin = p.isin
+        WHERE r.instrument_type = 'Conventional'
+          AND p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
+        ORDER BY p.gry_pct DESC NULLS LAST, p.maturity_date ASC
+        """,
+        ttl=60,
+    )
 
     refresh_state: list[dict[str, str]] = []
     refresh_map = {
@@ -213,6 +232,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "holdings": holdings_rows,
         "decisions": decision_rows,
         "refresh_state": refresh_state,
+        "gilt_ranking": gilt_ranking_rows,
     }
 
 
@@ -504,13 +524,68 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
     )
 
 
+def render_gilt_ranking_card(df: pd.DataFrame) -> None:
+    st.subheader("Conventional Gilt Ranking")
+    if df.empty:
+        st.info(
+            "No conventional gilt prices available yet. "
+            "Run a market data refresh to populate the ranking."
+        )
+        return
+
+    if df["gry_pct"].isna().all():
+        st.warning(
+            "Gilt prices are loaded but analytics (GRY and modified duration) "
+            "have not been computed yet. Run a market data refresh to complete the ranking."
+        )
+        st.dataframe(
+            df[["isin", "instrument_name", "maturity_date", "coupon_pct", "clean_price_gbp"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "isin": st.column_config.TextColumn("ISIN"),
+                "instrument_name": st.column_config.TextColumn("Name"),
+                "maturity_date": st.column_config.TextColumn("Maturity"),
+                "coupon_pct": st.column_config.NumberColumn("Coupon %", format="%.2f%%"),
+                "clean_price_gbp": st.column_config.NumberColumn("Clean Price", format="%.4f"),
+            },
+        )
+        return
+
+    best_gry = df["gry_pct"].max()
+    lowest_duration = df["modified_duration_years"].min()
+    gilt_count = len(df)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Best GRY", f"{best_gry * 100:.2f}%")
+    col2.metric("Lowest Duration", f"{lowest_duration:.2f} yrs" if pd.notna(lowest_duration) else "—")
+    col3.metric("Gilts in Snapshot", str(gilt_count))
+
+    display_df = df.assign(gry_pct=df["gry_pct"] * 100)
+    st.dataframe(
+        display_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "isin": st.column_config.TextColumn("ISIN"),
+            "instrument_name": st.column_config.TextColumn("Name"),
+            "maturity_date": st.column_config.TextColumn("Maturity"),
+            "coupon_pct": st.column_config.NumberColumn("Coupon %", format="%.2f%%"),
+            "clean_price_gbp": st.column_config.NumberColumn("Clean Price", format="%.4f"),
+            "gry_pct": st.column_config.NumberColumn("GRY %", format="%.2f%%"),
+            "modified_duration_years": st.column_config.NumberColumn("Mod. Duration", format="%.2f"),
+        },
+    )
+    st.caption("Ranked by GRY descending. Interactive re-sorting may reorder rows with missing analytics.")
+
+
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.subheader("Signals")
+    render_gilt_ranking_card(state["gilt_ranking"])
+    st.divider()
     active_signal_count = int(state["summary"]["active_signal_count"] or 0)
     st.write(
-        f"There are currently `{active_signal_count}` active persisted alert episodes. "
-        "Signal cards and diagnostics will build on the same `signal_readings` and "
-        "`signal_events` tables created at startup."
+        f"There are currently `{active_signal_count}` active persisted alert episodes."
     )
     if state["active_signals"].empty:
         st.info("No active signal episodes are stored yet.")
