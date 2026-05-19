@@ -105,8 +105,8 @@ def create_initial_schema(connection: sqlite3.Connection) -> None:
             cache_date              TEXT NOT NULL,
             isin                    TEXT NOT NULL,
             clean_price_gbp         REAL NOT NULL,
-            gry_pct                 REAL NOT NULL,
-            modified_duration_years REAL NOT NULL,
+            gry_pct                 REAL,
+            modified_duration_years REAL,
             coupon_pct              REAL NOT NULL,
             maturity_date           TEXT NOT NULL,
             fetched_at              TEXT NOT NULL,
@@ -307,9 +307,68 @@ def add_non_gilt_reference_refresh_source(connection: sqlite3.Connection) -> Non
     )
 
 
+def allow_gilt_price_cache_rows_without_analytics(
+    connection: sqlite3.Connection,
+) -> None:
+    # Price refresh lands before the shared GRY/duration engine, so cache rows
+    # must be able to exist in an intermediate price-only state.
+    columns = {
+        row[1]: row
+        for row in connection.execute("PRAGMA table_info(gilt_price_cache)")
+    }
+    if not columns:
+        return
+    if columns["gry_pct"][3] == 0 and columns["modified_duration_years"][3] == 0:
+        return
+
+    connection.execute("ALTER TABLE gilt_price_cache RENAME TO gilt_price_cache_old")
+    connection.executescript(
+        """
+        CREATE TABLE gilt_price_cache (
+            cache_date              TEXT NOT NULL,
+            isin                    TEXT NOT NULL,
+            clean_price_gbp         REAL NOT NULL,
+            gry_pct                 REAL,
+            modified_duration_years REAL,
+            coupon_pct              REAL NOT NULL,
+            maturity_date           TEXT NOT NULL,
+            fetched_at              TEXT NOT NULL,
+            PRIMARY KEY (cache_date, isin)
+        ) STRICT, WITHOUT ROWID;
+
+        INSERT INTO gilt_price_cache (
+            cache_date,
+            isin,
+            clean_price_gbp,
+            gry_pct,
+            modified_duration_years,
+            coupon_pct,
+            maturity_date,
+            fetched_at
+        )
+        SELECT
+            cache_date,
+            isin,
+            clean_price_gbp,
+            gry_pct,
+            modified_duration_years,
+            coupon_pct,
+            maturity_date,
+            fetched_at
+        FROM gilt_price_cache_old;
+
+        DROP TABLE gilt_price_cache_old;
+
+        CREATE INDEX IF NOT EXISTS ix_gilt_price_cache_history
+        ON gilt_price_cache(isin, cache_date DESC);
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
     create_non_gilt_reference_table,
     add_non_gilt_reference_refresh_source,
+    allow_gilt_price_cache_rows_without_analytics,
 ]
