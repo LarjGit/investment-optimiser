@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 from investment_optimiser.db import initialize_database
 from investment_optimiser.portfolio_import import (
+    ASSET_TYPE_OVERRIDES,
     Holding,
     IngestionError,
     fetch_portfolio_snapshot,
@@ -47,7 +49,10 @@ def test_load_ii_holdings_keeps_good_rows_and_attaches_parse_warnings() -> None:
             clean_price_gbp=99.12,
             market_value_gbp=9912.0,
             book_cost_gbp=10000.0,
-            import_warning=None,
+            import_warning=(
+                "Possible gilt holding could not be matched in gilt reference data; "
+                "defaulted to 'other'."
+            ),
         ),
         Holding(
             symbol="CSH2",
@@ -124,7 +129,8 @@ def test_import_ii_portfolio_snapshot_returns_warning_summary_and_persists(
     assert result.snapshot_date == "2026-05-18"
     assert result.imported_count == 2
     assert result.warning_messages == [
-        "CSH2: Price could not be parsed from 'bad'."
+        "TR68: Possible gilt holding could not be matched in gilt reference data; defaulted to 'other'.",
+        "CSH2: Price could not be parsed from 'bad'.",
     ]
     assert len(
         fetch_portfolio_snapshot(
@@ -132,6 +138,111 @@ def test_import_ii_portfolio_snapshot_returns_warning_summary_and_persists(
             snapshot_date="2026-05-18",
         )
     ) == 2
+
+
+def test_import_ii_portfolio_snapshot_classifies_assets_and_persists_warnings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "portfolio_snapshots.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO gilt_reference (
+                isin,
+                tidm,
+                instrument_name,
+                coupon_pct,
+                maturity_date,
+                dividend_months,
+                dividend_day,
+                ex_div_date,
+                instrument_type,
+                maturity_bracket,
+                last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "GB00BMF9LJ15",
+                "TR27",
+                "Treasury 2027",
+                4.25,
+                "2027-03-07",
+                "03,09",
+                7,
+                "2026-08-27",
+                "Conventional",
+                "0-5y",
+                "2026-05-19T09:00:00Z",
+            ),
+        )
+
+    uploaded_csv = BytesIO(
+        (
+            "Symbol,Name,Quantity,Price,Value,Book Cost\n"
+            "TR27,4¼% Treasury Gilt 2027,100,GBP99.12,\"9,912.00\",\"10,000.00\"\n"
+            "CSH2,Royal London Short Term Money Market,250,1.00,250.00,250.00\n"
+            "VUAG,Vanguard S&P 500 UCITS ETF,10,100.00,1000.00,900.00\n"
+            "MYST,Unmapped Asset,5,10.00,50.00,45.00\n"
+        ).encode("utf-8")
+    )
+
+    result = import_ii_portfolio_snapshot(
+        database_url,
+        uploaded_csv,
+        snapshot_date="2026-05-18",
+    )
+
+    assert result.warning_messages == [
+        "MYST: Asset type could not be classified confidently; defaulted to 'other'."
+    ]
+    assert fetch_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-18",
+    ) == [
+        Holding(
+            symbol="TR27",
+            name="4¼% Treasury Gilt 2027",
+            asset_type="gilt_conventional",
+            qty=100.0,
+            clean_price_gbp=99.12,
+            market_value_gbp=9912.0,
+            book_cost_gbp=10000.0,
+            import_warning=None,
+        ),
+        Holding(
+            symbol="VUAG",
+            name="Vanguard S&P 500 UCITS ETF",
+            asset_type="etf",
+            qty=10.0,
+            clean_price_gbp=100.0,
+            market_value_gbp=1000.0,
+            book_cost_gbp=900.0,
+            import_warning=None,
+        ),
+        Holding(
+            symbol="CSH2",
+            name="Royal London Short Term Money Market",
+            asset_type="mmf",
+            qty=250.0,
+            clean_price_gbp=1.0,
+            market_value_gbp=250.0,
+            book_cost_gbp=250.0,
+            import_warning=None,
+        ),
+        Holding(
+            symbol="MYST",
+            name="Unmapped Asset",
+            asset_type="other",
+            qty=5.0,
+            clean_price_gbp=10.0,
+            market_value_gbp=50.0,
+            book_cost_gbp=45.0,
+            import_warning="Asset type could not be classified confidently; defaulted to 'other'.",
+        ),
+    ]
 
 
 def test_load_ii_holdings_accepts_real_ii_headers_and_currency_formats() -> None:
@@ -156,7 +267,10 @@ def test_load_ii_holdings_accepts_real_ii_headers_and_currency_formats() -> None
             clean_price_gbp=0.9964,
             market_value_gbp=3435.22,
             book_cost_gbp=3481.98,
-            import_warning=None,
+            import_warning=(
+                "Possible gilt holding could not be matched in gilt reference data; "
+                "defaulted to 'other'."
+            ),
         ),
         Holding(
             symbol="B8XYYQ8",
@@ -168,4 +282,31 @@ def test_load_ii_holdings_accepts_real_ii_headers_and_currency_formats() -> None
             book_cost_gbp=37381.65,
             import_warning=None,
         ),
+    ]
+
+
+def test_load_ii_holdings_uses_symbol_overrides_before_name_heuristics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(ASSET_TYPE_OVERRIDES, "OVRD", "reit")
+    uploaded_csv = BytesIO(
+        (
+            "Symbol,Name,Quantity,Price,Value,Book Cost\n"
+            "OVRD,Generic Income Fund,10,100.00,1000.00,900.00\n"
+        ).encode("utf-8")
+    )
+
+    holdings = load_ii_holdings(uploaded_csv)
+
+    assert holdings == [
+        Holding(
+            symbol="OVRD",
+            name="Generic Income Fund",
+            asset_type="reit",
+            qty=10.0,
+            clean_price_gbp=100.0,
+            market_value_gbp=1000.0,
+            book_cost_gbp=900.0,
+            import_warning=None,
+        )
     ]
