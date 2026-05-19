@@ -20,7 +20,13 @@ from investment_optimiser.portfolio_import import (
     IngestionError,
     import_ii_portfolio_snapshot,
 )
-from investment_optimiser.equity_signals import ErpSignal, evaluate_erp_signal
+from investment_optimiser.equity_signals import (
+    ErpSignal,
+    YieldCurveSignal,
+    classify_curve_state,
+    evaluate_erp_signal,
+    evaluate_yield_curve_shape_signal,
+)
 from investment_optimiser.policy_pack import load_policy_pack
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
@@ -266,6 +272,61 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             "pe_ratio": row["pe_ratio"],
         }
 
+    yield_curve_rows = connection.query(
+        """
+        SELECT
+            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
+            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct,
+            cache_date
+        FROM yield_curve_cache
+        WHERE cache_date = (
+            SELECT MAX(cache_date) FROM yield_curve_cache WHERE curve_key = 'boe_10y'
+        )
+        GROUP BY cache_date
+        """,
+        ttl=60,
+    )
+    yield_curve_history_rows = connection.query(
+        """
+        SELECT
+            cache_date,
+            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
+            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct
+        FROM yield_curve_cache
+        WHERE curve_key IN ('boe_5y', 'boe_10y', 'boe_20y')
+          AND cache_date >= date('now', '-40 days')
+        GROUP BY cache_date
+        HAVING MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) IS NOT NULL
+        ORDER BY cache_date DESC
+        """,
+        ttl=60,
+    )
+
+    yield_curve: dict | None = None
+    if not yield_curve_rows.empty:
+        row = yield_curve_rows.iloc[0]
+        if pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]) and pd.notna(row["twenty_year_pct"]):
+            yield_curve = {
+                "cache_date": row["cache_date"],
+                "five_year_pct": float(row["five_year_pct"]),
+                "ten_year_pct": float(row["ten_year_pct"]),
+                "twenty_year_pct": float(row["twenty_year_pct"]),
+            }
+
+    yield_curve_history: list[tuple[str, str]] = []
+    for _, row in yield_curve_history_rows.iterrows():
+        if pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]) and pd.notna(row["twenty_year_pct"]):
+            curve_state = classify_curve_state(
+                float(row["five_year_pct"]),
+                float(row["ten_year_pct"]),
+                float(row["twenty_year_pct"]),
+            )
+            yield_curve_history.append((row["cache_date"], curve_state))
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -274,6 +335,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "refresh_state": refresh_state,
         "gilt_ranking": gilt_ranking_rows,
         "equity_valuation": equity_valuation,
+        "yield_curve": yield_curve,
+        "yield_curve_history": yield_curve_history,
     }
 
 
@@ -774,6 +837,61 @@ def render_equity_macro_signal_card(
         st.info(signal.explanation)
 
 
+def render_yield_curve_shape_signal_card(
+    yield_curve: dict | None,
+    yield_curve_history: list[tuple[str, str]],
+) -> None:
+    st.subheader("Yield Curve Shape Signal")
+
+    five_y: float | None = yield_curve.get("five_year_pct") if yield_curve else None
+    ten_y: float | None = yield_curve.get("ten_year_pct") if yield_curve else None
+    twenty_y: float | None = yield_curve.get("twenty_year_pct") if yield_curve else None
+    cache_date: str | None = yield_curve.get("cache_date") if yield_curve else None
+
+    signal = evaluate_yield_curve_shape_signal(
+        five_y=five_y,
+        ten_y=ten_y,
+        twenty_y=twenty_y,
+        cache_date=cache_date,
+        history=yield_curve_history,
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    if signal.state == "unavailable":
+        col1.metric("5y yield", "—")
+        col2.metric("10y yield", "—")
+        col3.metric("20y yield", "—")
+        col4.metric("10y−5y spread", "—")
+        st.error(signal.explanation)
+        return
+
+    col1.metric("5y yield", f"{signal.five_year_pct:.2f}%")
+    col2.metric("10y yield", f"{signal.ten_year_pct:.2f}%")
+    col3.metric("20y yield", f"{signal.twenty_year_pct:.2f}%")
+    col4.metric("10y−5y spread", f"{signal.spread_bps:+.0f}bps")
+
+    curve_label = signal.curve_state.capitalize() if signal.curve_state else "—"
+    days_str = f"{signal.consecutive_days} consecutive UK business days" if signal.consecutive_days is not None else "—"
+    st.caption(f"Shape: **{curve_label}** · {days_str}")
+
+    if signal.state in ("warning", "stale"):
+        st.warning(signal.explanation)
+    else:
+        st.info(signal.explanation)
+
+    with st.expander("About this signal"):
+        st.write(
+            "Uses the 10y−5y nominal par yield spread from Bank of England IADB data "
+            "(series IUDMNPY and IUDSNPY). The design target is the 10y−2y spread, but "
+            "the BoE IADB does not publish a 2-year series. "
+            "Classification: Normal (spread >+10bps), Inverted (<−10bps), "
+            "Flat (within ±10bps), Humped (10y above both 5y and 20y by >10bps). "
+            "A warning fires only after the non-normal shape has held for "
+            "5 consecutive UK business days."
+        )
+
+
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.subheader("Signals")
     render_gilt_ranking_card(state["gilt_ranking"])
@@ -783,6 +901,11 @@ def render_signals_tab(state: dict[str, Any]) -> None:
         equity_valuation=state.get("equity_valuation"),
         gilt_ranking=state["gilt_ranking"],
         erp_threshold_pct=erp_threshold_pct,
+    )
+    st.divider()
+    render_yield_curve_shape_signal_card(
+        yield_curve=state.get("yield_curve"),
+        yield_curve_history=state.get("yield_curve_history", []),
     )
     st.divider()
     active_signal_count = int(state["summary"]["active_signal_count"] or 0)

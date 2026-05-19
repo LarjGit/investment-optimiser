@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import datetime
+
 import pytest
 
-from investment_optimiser.equity_signals import ErpSignal, evaluate_erp_signal
+from investment_optimiser.equity_signals import (
+    ErpSignal,
+    YieldCurveSignal,
+    classify_curve_state,
+    count_consecutive_bdays_with_state,
+    evaluate_erp_signal,
+    evaluate_yield_curve_shape_signal,
+)
 
 
 def test_unavailable_when_pe_ratio_is_none() -> None:
@@ -116,3 +125,207 @@ def test_not_stale_at_exactly_five_trading_days(monkeypatch) -> None:
         erp_threshold_pct=0.0,
     )
     assert result.state != "stale"
+
+
+# ---------------------------------------------------------------------------
+# classify_curve_state
+# ---------------------------------------------------------------------------
+
+def test_classify_normal_when_spread_above_threshold() -> None:
+    # 10y=4.5%, 5y=4.0% → spread=50bps > 10bps → normal
+    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.8) == "normal"
+
+
+def test_classify_inverted_when_spread_below_negative_threshold() -> None:
+    # 10y=4.0%, 5y=4.5% → spread=-50bps < -10bps → inverted
+    assert classify_curve_state(five_y=4.5, ten_y=4.0, twenty_y=3.8) == "inverted"
+
+
+def test_classify_flat_when_spread_within_threshold() -> None:
+    # 10y=4.05%, 5y=4.0% → spread=5bps, |5| <= 10 → flat
+    assert classify_curve_state(five_y=4.0, ten_y=4.05, twenty_y=4.0) == "flat"
+
+
+def test_classify_humped_when_ten_year_is_local_peak() -> None:
+    # 5y=4.0%, 10y=4.5%, 20y=4.1% → 10y above both by >10bps → humped
+    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.1) == "humped"
+
+
+def test_classify_normal_not_humped_when_twenty_year_also_high() -> None:
+    # 5y=4.0%, 10y=4.5%, 20y=4.8% → 10y not above 20y → not humped → normal
+    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.8) == "normal"
+
+
+def test_classify_respects_custom_threshold() -> None:
+    # spread=15bps, threshold=20bps → flat (not normal)
+    assert classify_curve_state(five_y=4.0, ten_y=4.15, twenty_y=4.2, flat_threshold_bps=20.0) == "flat"
+
+
+# ---------------------------------------------------------------------------
+# count_consecutive_bdays_with_state
+# ---------------------------------------------------------------------------
+
+_NO_HOLIDAYS: set[datetime.date] = set()
+
+
+def test_consecutive_returns_zero_for_empty_history() -> None:
+    assert count_consecutive_bdays_with_state([], "normal", _NO_HOLIDAYS) == 0
+
+
+def test_consecutive_counts_matching_streak() -> None:
+    # Mon-Fri last week all "inverted"
+    history = [
+        ("2026-05-15", "inverted"),  # Fri
+        ("2026-05-14", "inverted"),  # Thu
+        ("2026-05-13", "inverted"),  # Wed
+        ("2026-05-12", "inverted"),  # Tue
+        ("2026-05-11", "inverted"),  # Mon
+    ]
+    assert count_consecutive_bdays_with_state(history, "inverted", _NO_HOLIDAYS) == 5
+
+
+def test_consecutive_breaks_on_different_state() -> None:
+    history = [
+        ("2026-05-15", "inverted"),
+        ("2026-05-14", "inverted"),
+        ("2026-05-13", "normal"),   # different state — streak stops
+        ("2026-05-12", "inverted"),
+        ("2026-05-11", "inverted"),
+    ]
+    assert count_consecutive_bdays_with_state(history, "inverted", _NO_HOLIDAYS) == 2
+
+
+def test_consecutive_breaks_on_data_gap_for_business_day() -> None:
+    # 2026-05-14 (Thu) is missing from history — business day with no data breaks streak
+    history = [
+        ("2026-05-15", "inverted"),  # Fri — present
+        # Thu missing
+        ("2026-05-13", "inverted"),  # Wed
+    ]
+    assert count_consecutive_bdays_with_state(history, "inverted", _NO_HOLIDAYS) == 1
+
+
+def test_consecutive_skips_weekend_days() -> None:
+    # Sat/Sun are not business days and should not break the streak
+    history = [
+        ("2026-05-18", "inverted"),  # Mon
+        ("2026-05-15", "inverted"),  # Fri (weekend gap in between is fine)
+        ("2026-05-14", "inverted"),  # Thu
+    ]
+    assert count_consecutive_bdays_with_state(history, "inverted", _NO_HOLIDAYS) == 3
+
+
+def test_consecutive_skips_bank_holiday() -> None:
+    # 2026-05-04 is a Monday bank holiday — should not break the streak
+    may_bank_holiday = datetime.date(2026, 5, 4)
+    history = [
+        ("2026-05-05", "inverted"),  # Tue
+        ("2026-05-01", "inverted"),  # Fri (Mon is a bank holiday)
+    ]
+    assert count_consecutive_bdays_with_state(
+        history, "inverted", {may_bank_holiday}
+    ) == 2
+
+
+# ---------------------------------------------------------------------------
+# evaluate_yield_curve_shape_signal
+# ---------------------------------------------------------------------------
+
+def test_yield_curve_unavailable_when_no_data() -> None:
+    result = evaluate_yield_curve_shape_signal(
+        five_y=None, ten_y=None, twenty_y=None, cache_date=None, history=[]
+    )
+    assert result.state == "unavailable"
+    assert result.curve_state is None
+
+
+def test_yield_curve_unavailable_when_partial_data() -> None:
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.0, ten_y=None, twenty_y=4.5, cache_date="2026-05-19", history=[]
+    )
+    assert result.state == "unavailable"
+
+
+def test_yield_curve_stale_when_old_data(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "investment_optimiser.equity_signals.trading_days_since", lambda _: 6
+    )
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        cache_date="2026-05-10",
+        history=[("2026-05-10", "normal")],
+    )
+    assert result.state == "stale"
+    assert result.curve_state == "normal"
+
+
+def test_yield_curve_quiet_when_normal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "investment_optimiser.equity_signals.trading_days_since", lambda _: 1
+    )
+    history = [(f"2026-05-{d:02d}", "normal") for d in range(5, 20)]
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        cache_date="2026-05-19",
+        history=history,
+    )
+    assert result.state == "quiet"
+    assert result.curve_state == "normal"
+
+
+def test_yield_curve_quiet_when_inverted_but_too_short(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "investment_optimiser.equity_signals.trading_days_since", lambda _: 1
+    )
+    # Only 3 consecutive business days (Fri/Mon/Tue) — below persistence threshold
+    history = [
+        ("2026-05-19", "inverted"),  # Tue
+        ("2026-05-18", "inverted"),  # Mon
+        ("2026-05-15", "inverted"),  # Fri
+        ("2026-05-14", "normal"),    # Thu — different state
+    ]
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.5, ten_y=4.0, twenty_y=3.8,
+        cache_date="2026-05-19",
+        history=history,
+        persistence_days=5,
+    )
+    assert result.state == "quiet"
+    assert result.curve_state == "inverted"
+    assert result.consecutive_days == 3
+
+
+def test_yield_curve_warning_when_inverted_long_enough(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "investment_optimiser.equity_signals.trading_days_since", lambda _: 1
+    )
+    # 5 consecutive business days: Wed/Thu/Fri/Mon/Tue
+    history = [
+        ("2026-05-19", "inverted"),  # Tue
+        ("2026-05-18", "inverted"),  # Mon
+        ("2026-05-15", "inverted"),  # Fri
+        ("2026-05-14", "inverted"),  # Thu
+        ("2026-05-13", "inverted"),  # Wed
+    ]
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.5, ten_y=4.0, twenty_y=3.8,
+        cache_date="2026-05-19",
+        history=history,
+        persistence_days=5,
+    )
+    assert result.state == "warning"
+    assert result.curve_state == "inverted"
+    assert result.consecutive_days == 5
+
+
+def test_yield_curve_spread_bps_computed_correctly(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "investment_optimiser.equity_signals.trading_days_since", lambda _: 1
+    )
+    # 10y=4.5, 5y=4.0 → spread = 50bps
+    result = evaluate_yield_curve_shape_signal(
+        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        cache_date="2026-05-19",
+        history=[("2026-05-19", "normal")],
+    )
+    assert result.spread_bps == pytest.approx(50.0, abs=1e-6)
