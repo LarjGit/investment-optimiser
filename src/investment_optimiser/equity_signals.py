@@ -84,7 +84,15 @@ def fetch_duration_liquidity_metrics(connection: sqlite3.Connection) -> list[dic
           AND ps.isin IS NOT NULL
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            "isin": row[0],
+            "market_value_gbp": row[1],
+            "modified_duration_years": row[2],
+            "maturity_date": row[3],
+        }
+        for row in rows
+    ]
 
 
 def evaluate_duration_liquidity_signal(

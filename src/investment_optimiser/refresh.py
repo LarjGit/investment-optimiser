@@ -12,6 +12,7 @@ from investment_optimiser.portfolio_import import (
     PortfolioImportResult,
     import_ii_portfolio_snapshot,
 )
+from investment_optimiser.signal_persistence import run_signal_persistence
 
 
 REFRESH_SOURCE_ORDER = (
@@ -82,6 +83,13 @@ class RefreshCoordinator:
                 source_warning_messages.extend(warning_messages)
                 if not source_succeeded:
                     source_failures += 1
+
+            signal_succeeded, signal_warnings = self._run_signal_persistence_step(
+                database_path, snapshot_date
+            )
+            source_warning_messages.extend(signal_warnings)
+            if not signal_succeeded:
+                source_failures += 1
         except Exception as exc:
             return RefreshResult(
                 status="failed",
@@ -120,6 +128,18 @@ class RefreshCoordinator:
                 uploaded_file,
                 snapshot_date=snapshot_date,
             )
+
+    def _run_signal_persistence_step(
+        self, database_path: Path, reading_date: str
+    ) -> tuple[bool, list[str]]:
+        try:
+            with _connect_writer(database_path) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                run_signal_persistence(connection, reading_date=reading_date, now=_utc_now())
+                connection.commit()
+                return True, []
+        except Exception as exc:
+            return False, [f"Signal persistence failed: {exc}"]
 
     def _run_source(self, database_path: Path, source: str) -> tuple[bool, list[str]]:
         handler = self._source_handlers.get(source, _not_implemented_handler(source))
