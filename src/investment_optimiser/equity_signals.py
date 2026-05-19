@@ -44,6 +44,132 @@ class ErpSignal:
     explanation: str
 
 
+@dataclass(frozen=True)
+class DurationLiquiditySignal:
+    state: str
+    avg_duration_years: float | None
+    concentration_10y_plus_pct: float | None
+    duration_floor_years: float
+    duration_ceiling_years: float
+    liquidity_threshold_pct: float
+    gilt_count: int
+    analytics_missing_count: int
+    explanation: str
+
+
+def _cutoff_10y() -> datetime.date:
+    today = datetime.date.today()
+    try:
+        return today.replace(year=today.year + 10)
+    except ValueError:
+        return today.replace(year=today.year + 10, day=28)
+
+
+def fetch_duration_liquidity_metrics(connection: sqlite3.Connection) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT
+            ps.isin,
+            ps.market_value_gbp,
+            gpc.modified_duration_years,
+            gpc.maturity_date
+        FROM portfolio_snapshots ps
+        LEFT JOIN gilt_price_cache gpc
+            ON gpc.isin = ps.isin
+            AND gpc.cache_date = (
+                SELECT MAX(cache_date) FROM gilt_price_cache WHERE isin = ps.isin
+            )
+        WHERE ps.snapshot_date = (SELECT MAX(snapshot_date) FROM portfolio_snapshots)
+          AND ps.asset_type IN ('gilt_conventional', 'gilt_index_linked')
+          AND ps.isin IS NOT NULL
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def evaluate_duration_liquidity_signal(
+    rows: list[dict],
+    floor: float,
+    ceiling: float,
+    liquidity_threshold: float,
+) -> DurationLiquiditySignal:
+    if not rows:
+        return DurationLiquiditySignal(
+            state="unavailable",
+            avg_duration_years=None,
+            concentration_10y_plus_pct=None,
+            duration_floor_years=floor,
+            duration_ceiling_years=ceiling,
+            liquidity_threshold_pct=liquidity_threshold,
+            gilt_count=0,
+            analytics_missing_count=0,
+            explanation="No gilt holdings found in the latest portfolio snapshot.",
+        )
+
+    gilt_count = len(rows)
+    analytics_missing_count = sum(1 for r in rows if pd.isna(r["modified_duration_years"]))
+
+    if analytics_missing_count > 0:
+        return DurationLiquiditySignal(
+            state="degraded",
+            avg_duration_years=None,
+            concentration_10y_plus_pct=None,
+            duration_floor_years=floor,
+            duration_ceiling_years=ceiling,
+            liquidity_threshold_pct=liquidity_threshold,
+            gilt_count=gilt_count,
+            analytics_missing_count=analytics_missing_count,
+            explanation=(
+                f"{analytics_missing_count} of {gilt_count} gilt holding(s) have no duration analytics. "
+                "Run a market refresh to populate analytics."
+            ),
+        )
+
+    total_value = sum(r["market_value_gbp"] for r in rows)
+    avg_duration = (
+        sum(r["modified_duration_years"] * r["market_value_gbp"] for r in rows) / total_value
+    )
+
+    cutoff = _cutoff_10y()
+    long_dated_value = sum(
+        r["market_value_gbp"]
+        for r in rows
+        if pd.notna(r["maturity_date"])
+        and datetime.date.fromisoformat(r["maturity_date"]) > cutoff
+    )
+    concentration = long_dated_value / total_value * 100.0
+
+    alerts: list[str] = []
+    if avg_duration < floor:
+        alerts.append(f"avg duration {avg_duration:.2f}y is below floor {floor:.2f}y")
+    if avg_duration > ceiling:
+        alerts.append(f"avg duration {avg_duration:.2f}y is above ceiling {ceiling:.2f}y")
+    if concentration > liquidity_threshold:
+        alerts.append(f"10y+ concentration {concentration:.1f}% exceeds {liquidity_threshold:.1f}% threshold")
+
+    if alerts:
+        state = "triggered"
+        explanation = "Alert: " + "; ".join(alerts) + "."
+    else:
+        state = "quiet"
+        explanation = (
+            f"Duration {avg_duration:.2f}y is within range [{floor:.2f}y, {ceiling:.2f}y]. "
+            f"10y+ concentration {concentration:.1f}% is within {liquidity_threshold:.1f}% threshold."
+        )
+
+    return DurationLiquiditySignal(
+        state=state,
+        avg_duration_years=round(avg_duration, 4),
+        concentration_10y_plus_pct=round(concentration, 4),
+        duration_floor_years=floor,
+        duration_ceiling_years=ceiling,
+        liquidity_threshold_pct=liquidity_threshold,
+        gilt_count=gilt_count,
+        analytics_missing_count=0,
+        explanation=explanation,
+    )
+
+
 def fetch_equity_valuation(connection: sqlite3.Connection) -> dict | None:
     row = connection.execute(
         """

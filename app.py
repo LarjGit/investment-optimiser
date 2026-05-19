@@ -21,9 +21,11 @@ from investment_optimiser.portfolio_import import (
     import_ii_portfolio_snapshot,
 )
 from investment_optimiser.equity_signals import (
+    DurationLiquiditySignal,
     ErpSignal,
     YieldCurveSignal,
     classify_curve_state,
+    evaluate_duration_liquidity_signal,
     evaluate_erp_signal,
     evaluate_yield_curve_shape_signal,
 )
@@ -55,6 +57,9 @@ REFRESH_FEEDBACK_KEY = "refresh_feedback"
 REFRESH_WARNING_MESSAGES_KEY = "refresh_warning_messages"
 PORTFOLIO_UPLOAD_WIDGET_KEY = "ii_csv_upload"
 ERP_THRESHOLD_KEY = "erp_threshold_pct"
+DURATION_FLOOR_KEY = "duration_floor_years"
+DURATION_CEILING_KEY = "duration_ceiling_years"
+LIQUIDITY_THRESHOLD_KEY = "liquidity_concentration_10y_plus_pct"
 
 
 def _policy_field_default(key: str) -> object:
@@ -327,6 +332,26 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             )
             yield_curve_history.append((row["cache_date"], curve_state))
 
+    duration_liquidity_rows = connection.query(
+        """
+        SELECT
+            ps.isin,
+            ps.market_value_gbp,
+            gpc.modified_duration_years,
+            gpc.maturity_date
+        FROM portfolio_snapshots ps
+        LEFT JOIN gilt_price_cache gpc
+            ON gpc.isin = ps.isin
+            AND gpc.cache_date = (
+                SELECT MAX(cache_date) FROM gilt_price_cache WHERE isin = ps.isin
+            )
+        WHERE ps.snapshot_date = (SELECT MAX(snapshot_date) FROM portfolio_snapshots)
+          AND ps.asset_type IN ('gilt_conventional', 'gilt_index_linked')
+          AND ps.isin IS NOT NULL
+        """,
+        ttl=60,
+    )
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -337,6 +362,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "equity_valuation": equity_valuation,
         "yield_curve": yield_curve,
         "yield_curve_history": yield_curve_history,
+        "duration_liquidity_rows": duration_liquidity_rows,
     }
 
 
@@ -663,6 +689,44 @@ def render_sidebar(
             key=ERP_THRESHOLD_KEY,
             help="ERP below this level triggers the warning banner.",
         )
+        st.divider()
+        st.caption("Duration & Liquidity")
+        if DURATION_FLOOR_KEY not in st.session_state:
+            st.session_state[DURATION_FLOOR_KEY] = float(
+                _policy_field_default("duration_floor_years") or 2.0
+            )
+        if DURATION_CEILING_KEY not in st.session_state:
+            st.session_state[DURATION_CEILING_KEY] = float(
+                _policy_field_default("duration_ceiling_years") or 8.0
+            )
+        if LIQUIDITY_THRESHOLD_KEY not in st.session_state:
+            st.session_state[LIQUIDITY_THRESHOLD_KEY] = float(
+                _policy_field_default("liquidity_concentration_10y_plus_pct") or 35.0
+            )
+        st.number_input(
+            "Duration floor (years)",
+            min_value=0.0,
+            max_value=30.0,
+            step=0.5,
+            key=DURATION_FLOOR_KEY,
+            help="Alert if weighted-average gilt duration falls below this.",
+        )
+        st.number_input(
+            "Duration ceiling (years)",
+            min_value=0.0,
+            max_value=30.0,
+            step=0.5,
+            key=DURATION_CEILING_KEY,
+            help="Alert if weighted-average gilt duration exceeds this.",
+        )
+        st.number_input(
+            "10y+ concentration limit (%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=5.0,
+            key=LIQUIDITY_THRESHOLD_KEY,
+            help="Alert if gilt value maturing beyond 10 years exceeds this share.",
+        )
 
 
 def render_portfolio_tab(state: dict[str, Any]) -> None:
@@ -892,6 +956,57 @@ def render_yield_curve_shape_signal_card(
         )
 
 
+def render_duration_liquidity_signal_card(
+    duration_liquidity_rows: pd.DataFrame,
+    floor: float,
+    ceiling: float,
+    liquidity_threshold: float,
+) -> None:
+    st.subheader("Duration & Liquidity Alert")
+
+    rows = duration_liquidity_rows.to_dict("records") if not duration_liquidity_rows.empty else []
+
+    signal = evaluate_duration_liquidity_signal(
+        rows=rows, floor=floor, ceiling=ceiling, liquidity_threshold=liquidity_threshold
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    if signal.state == "unavailable":
+        col1.metric("Avg duration", "—")
+        col2.metric("10y+ concentration", "—")
+        col3.metric("Gilt holdings", "0")
+        st.error(signal.explanation)
+        return
+
+    col3.metric("Gilt holdings", str(signal.gilt_count))
+
+    if signal.state == "degraded":
+        col1.metric("Avg duration", "—")
+        col2.metric("10y+ concentration", "—")
+        st.warning(signal.explanation)
+        return
+
+    mid = (floor + ceiling) / 2
+    col1.metric(
+        "Avg duration",
+        f"{signal.avg_duration_years:.2f}y",
+        delta=f"{signal.avg_duration_years - mid:+.2f}y vs midpoint",
+        delta_color="off",
+    )
+    col2.metric(
+        "10y+ concentration",
+        f"{signal.concentration_10y_plus_pct:.1f}%",
+        delta=f"limit {liquidity_threshold:.0f}%",
+        delta_color="off",
+    )
+
+    if signal.state == "triggered":
+        st.warning(signal.explanation)
+    else:
+        st.info(signal.explanation)
+
+
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.subheader("Signals")
     render_gilt_ranking_card(state["gilt_ranking"])
@@ -906,6 +1021,13 @@ def render_signals_tab(state: dict[str, Any]) -> None:
     render_yield_curve_shape_signal_card(
         yield_curve=state.get("yield_curve"),
         yield_curve_history=state.get("yield_curve_history", []),
+    )
+    st.divider()
+    render_duration_liquidity_signal_card(
+        duration_liquidity_rows=state.get("duration_liquidity_rows", pd.DataFrame()),
+        floor=float(st.session_state.get(DURATION_FLOOR_KEY, 2.0)),
+        ceiling=float(st.session_state.get(DURATION_CEILING_KEY, 8.0)),
+        liquidity_threshold=float(st.session_state.get(LIQUIDITY_THRESHOLD_KEY, 35.0)),
     )
     st.divider()
     active_signal_count = int(state["summary"]["active_signal_count"] or 0)
