@@ -15,6 +15,7 @@ from investment_optimiser.portfolio_import import (
     import_ii_portfolio_snapshot,
 )
 from investment_optimiser.boe import boe_handler
+from investment_optimiser.dmo import dmo_handler
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 
 
@@ -523,7 +524,7 @@ def render_refresh_controls(
         with st.spinner("Refreshing market data...", show_time=True):
             coordinator = RefreshCoordinator(
                 portfolio_csv_path=portfolio_csv_path,
-                source_handlers={"boe": boe_handler},
+                source_handlers={"boe": boe_handler, "dmo_reference": dmo_handler},
             )
             result = coordinator.run_refresh(
                 database_url,
