@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import lru_cache
 from importlib import resources
 import json
 from typing import Any
@@ -14,17 +13,20 @@ _POLICY_PACK_DATA_FILES: dict[str, str] = {
 }
 
 
-@lru_cache(maxsize=None)
-def _load_policy_pack_once(version: str) -> dict[str, Any]:
+def _read_policy_pack_text(version: str) -> str:
     data_file = _POLICY_PACK_DATA_FILES.get(version)
     if data_file is None:
         raise ValueError(f"Unsupported policy pack version: {version}")
 
-    raw_policy_pack = (
+    return (
         resources.files("investment_optimiser")
         .joinpath(data_file)
         .read_text(encoding="utf-8")
     )
+
+
+def _load_policy_pack_once(version: str) -> dict[str, Any]:
+    raw_policy_pack = _read_policy_pack_text(version)
     policy_pack = json.loads(raw_policy_pack)
 
     if policy_pack.get("policy_version") != version:

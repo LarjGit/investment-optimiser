@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from investment_optimiser import policy_pack as policy_pack_module
 from investment_optimiser.policy_pack import dump_policy_pack_json, load_policy_pack
 
 
@@ -39,11 +40,67 @@ def test_load_policy_pack_v1_exposes_frozen_contract() -> None:
     }
 
 
+def test_load_policy_pack_v1_exposes_user_facing_bucket_labels() -> None:
+    policy_pack = load_policy_pack("v1")
+
+    labels_by_id = {
+        bucket["id"]: bucket["label"]
+        for bucket in policy_pack["baseline_bucket_model"]["buckets"]
+    }
+
+    assert labels_by_id["listed_risk_assets"] == "Equities"
+    assert (
+        labels_by_id["diversifiers_and_manual"]
+        == "Real Assets, Diversifiers & Other"
+    )
+
+
 def test_dump_policy_pack_json_is_canonical_and_round_trips() -> None:
     dumped_policy_pack = dump_policy_pack_json("v1")
 
     assert dumped_policy_pack.endswith("\n")
     assert json.loads(dumped_policy_pack) == load_policy_pack("v1")
+
+
+def test_load_policy_pack_reads_current_pack_contents_each_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = iter(
+        [
+            json.dumps(
+                {
+                    "policy_version": "v1",
+                    "baseline_bucket_model": {
+                        "buckets": [
+                            {"id": "listed_risk_assets", "label": "Old label"}
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "policy_version": "v1",
+                    "baseline_bucket_model": {
+                        "buckets": [
+                            {"id": "listed_risk_assets", "label": "New label"}
+                        ]
+                    },
+                }
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        policy_pack_module,
+        "_read_policy_pack_text",
+        lambda version: next(payloads),
+    )
+
+    first = load_policy_pack("v1")
+    second = load_policy_pack("v1")
+
+    assert first["baseline_bucket_model"]["buckets"][0]["label"] == "Old label"
+    assert second["baseline_bucket_model"]["buckets"][0]["label"] == "New label"
 
 
 def test_load_policy_pack_rejects_unknown_version() -> None:

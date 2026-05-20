@@ -60,7 +60,7 @@
       },
       {
         "id": "listed_risk_assets",
-        "label": "Listed risk assets",
+        "label": "Equities",
         "description": "Equities and exchange-traded listed risk assets tracked as the main growth bucket.",
         "target_role": "portfolio_growth_and_risk_budget",
         "default_asset_type_fallbacks": [
@@ -71,7 +71,7 @@
       },
       {
         "id": "diversifiers_and_manual",
-        "label": "Diversifiers and manual bucket",
+        "label": "Real Assets, Diversifiers & Other",
         "description": "REITs, funds, specialist holdings, and any instrument that needs an explicit manual bucket override.",
         "target_role": "catch_all_for_non_core_assets_that_need_bounded_or_manual_treatment",
         "default_asset_type_fallbacks": [

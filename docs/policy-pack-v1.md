@@ -26,13 +26,56 @@ The top-layer baseline is a bucket-weight vector that sums to 100 percent of the
 - `listed_risk_assets`
 - `diversifiers_and_manual`
 
+In the current UI, those bucket IDs render with these user-facing labels:
+
+- `Liquidity reserve`
+- `Short-duration nominal gilts`
+- `Long-duration nominal gilts`
+- `Index-linked gilts`
+- `Equities`
+- `Real Assets, Diversifiers & Other`
+
 Bucket assignment follows this priority:
 
 1. Explicit bucket override
 2. Derived metadata rule
-3. Asset-type fallback
+3. Name-keyword inference
+4. Asset-type fallback
 
 This means the frozen v1 contract is at the bucket level, while lower-level sleeves still decide how to express that budget in specific holdings.
+
+### Assignment rules in plain English
+
+**Priority 1 — Explicit override.** Any symbol registered in `SYMBOL_OVERRIDES` in `bucket_assignment.py` goes directly to the specified bucket. This wins unconditionally. In v1 the dict is empty; entries must be added in code.
+
+**Priority 2 — Derived metadata.** Rules that use information beyond wrapper type:
+- `mmf` → Liquidity reserve
+- `gilt_index_linked` → Index-linked gilts
+- `gilt_conventional` with known maturity ≤ 5 years → Short-duration nominal gilts
+- `gilt_conventional` with known maturity > 5 years → Long-duration nominal gilts
+- `gilt_conventional` with unknown maturity → defers to fallback (conservatively treated as long-duration)
+
+**Priority 3 — Name-keyword inference.** Applied only to wrapper types whose economic exposure cannot be determined from `asset_type` alone (`etf`, `fund`, `investment_trust`, `other`). Keywords are matched case-insensitively against `instrument_name`, in this order:
+
+| Matched keywords | Bucket |
+|---|---|
+| infrastructure, property, real estate, reit, commodity, gold, silver, natural resource, absolute return, hedge | Real Assets, Diversifiers & Other |
+| index-linked, index linked, linker, inflation-linked | Index-linked gilts |
+| gilt, government bond, uk bond | Long-duration nominal gilts (conservative; no maturity data) |
+| money market, cash fund, liquidity, ultra short | Liquidity reserve |
+| equity, equities, shares, stock | Equities |
+
+This is the mechanism that routes a world-equity OEIC into Equities and a gold ETC or infrastructure investment trust into Real Assets, Diversifiers & Other — without relying on wrapper type alone.
+
+**Priority 4 — Asset-type fallback.** When keywords yield nothing, the raw `asset_type` determines the bucket:
+- `equity`, `etf`, `investment_trust` → Equities
+- `reit`, `fund`, `other` → Real Assets, Diversifiers & Other
+
+Note: plain investment trusts without recognisable keywords default to Equities. If a specific IT should land elsewhere, register a symbol override.
+
+**Resolution method tagging.** `assign_bucket()` returns a `BucketResolution` with both `bucket_id` and `method` (`override`, `derived_metadata`, `name_keywords`, `asset_type_fallback`, `catch_all`). The view layer can use `method` to flag holdings classified by keywords or catch-all as requiring review.
+
+**Future improvement.** IA sector codes would replace name-keyword inference as the primary exposure signal. No enrichment pipeline exists for them in v1.
 
 ## Named Scenarios
 
