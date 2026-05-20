@@ -37,6 +37,7 @@ from investment_optimiser.strategic_baseline import (
     BaselineRecord,
     insert_baseline,
 )
+from investment_optimiser.allocation_view import build_allocation_table, enrich_with_buckets, style_allocation_table
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -193,7 +194,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             quantity,
             market_value_gbp,
             weight_pct,
-            snapshot_date
+            snapshot_date,
+            isin
         FROM portfolio_snapshots
         WHERE snapshot_date = (
             SELECT MAX(snapshot_date)
@@ -207,6 +209,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         connection,
         holdings_rows,
     )
+    holdings_rows = enrich_holdings_with_maturity_years(connection, holdings_rows)
     decision_rows = connection.query(
         """
         SELECT id, decision_date, action, instruments_affected, notes, signal_event_id, created_at
@@ -460,6 +463,30 @@ def enrich_holdings_with_latest_non_gilt_prices(
         )
 
     return enriched_frame.drop(columns=["yahoo_ticker"], errors="ignore")
+
+
+def enrich_holdings_with_maturity_years(
+    connection: Any,
+    holdings_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    if holdings_frame.empty:
+        return holdings_frame.assign(maturity_years=None)
+    has_gilts = holdings_frame["asset_type"].isin({"gilt_conventional", "gilt_index_linked"}).any()
+    if not has_gilts:
+        return holdings_frame.assign(maturity_years=None)
+    maturity_rows = connection.query(
+        "SELECT isin, maturity_date FROM gilt_reference",
+        ttl=3600,
+    )
+    if maturity_rows.empty:
+        return holdings_frame.assign(maturity_years=None)
+    today = pd.Timestamp.today().normalize()
+    maturity_rows["maturity_years"] = (
+        pd.to_datetime(maturity_rows["maturity_date"]) - today
+    ).dt.days / 365.25
+    return holdings_frame.merge(
+        maturity_rows[["isin", "maturity_years"]], on="isin", how="left"
+    )
 
 
 def _add_empty_refreshed_price_columns(holdings_frame: pd.DataFrame) -> pd.DataFrame:
@@ -758,6 +785,50 @@ def render_sidebar(
         )
 
 
+def _render_allocation_vs_baseline(
+    holdings_frame: pd.DataFrame,
+    current_baseline: Any,
+) -> None:
+    st.subheader("Allocation vs Baseline")
+    if current_baseline is None:
+        st.info("No baseline set. Add one in the Scenarios tab.")
+        return
+
+    pack = load_policy_pack()
+    buckets = pack["baseline_bucket_model"]["buckets"]
+    bucket_labels = {b["id"]: b["label"] for b in buckets}
+
+    alloc = build_allocation_table(holdings_frame, current_baseline.weights, bucket_labels)
+    display = alloc[["label", "current_pct", "baseline_pct", "drift_pct"]].rename(
+        columns={"label": "Bucket", "current_pct": "Current %", "baseline_pct": "Baseline %", "drift_pct": "Drift %"}
+    )
+    styled = (
+        style_allocation_table(display)
+        .format({"Current %": "{:.1f}", "Baseline %": "{:.1f}", "Drift %": "{:+.1f}"})
+    )
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    uncertain_buckets = alloc[alloc["uncertain"] == True]
+    if not uncertain_buckets.empty:
+        enriched = enrich_with_buckets(holdings_frame)
+        uncertain_rows = enriched[enriched["resolution_method"].isin({"name_keywords", "catch_all"})]
+        st.caption(
+            "⚠ Some holdings were classified by name-keyword matching or fell to the catch-all bucket. "
+            "Use symbol overrides in the code to correct any misclassifications."
+        )
+        with st.expander("Holdings with uncertain bucket classification"):
+            st.dataframe(
+                uncertain_rows[["symbol", "instrument_name", "asset_type", "bucket_id", "resolution_method"]].rename(
+                    columns={"bucket_id": "Assigned bucket", "resolution_method": "Method"}
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    st.divider()
+
+
 def render_portfolio_tab(state: dict[str, Any]) -> None:
     summary = state["summary"]
     holdings_frame = state["holdings"]
@@ -778,6 +849,8 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
         "Snapshot values come from the imported broker CSV. Refreshed non-gilt prices "
         "and values are overlaid from the persisted Yahoo cache when available."
     )
+
+    _render_allocation_vs_baseline(holdings_frame, state.get("current_baseline"))
 
     portfolio_kpis = build_portfolio_kpis(
         holdings_frame.to_dict("records"),
