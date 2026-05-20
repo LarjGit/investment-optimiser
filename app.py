@@ -250,6 +250,10 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """,
         ttl=60,
     )
+    gilt_ref_count_rows = connection.query(
+        "SELECT COUNT(*) AS total FROM gilt_reference WHERE instrument_type = 'Conventional'",
+        ttl=60,
+    )
     equity_valuation_rows = connection.query(
         """
         SELECT cache_date, pe_ratio
@@ -385,6 +389,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             notes=row["notes"] if pd.notna(row["notes"]) else None,
         )
 
+    gilt_candidate_warnings = _build_gilt_candidate_warnings(gilt_ranking_rows, gilt_ref_count_rows)
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -392,12 +398,33 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "decisions": decision_rows,
         "refresh_state": refresh_state,
         "gilt_ranking": gilt_ranking_rows,
+        "gilt_candidate_warnings": gilt_candidate_warnings,
         "equity_valuation": equity_valuation,
         "yield_curve": yield_curve,
         "yield_curve_history": yield_curve_history,
         "duration_liquidity_rows": duration_liquidity_rows,
         "current_baseline": current_baseline,
     }
+
+
+def _build_gilt_candidate_warnings(
+    gilt_ranking: pd.DataFrame,
+    gilt_ref_count: pd.DataFrame,
+) -> list[str]:
+    warnings: list[str] = []
+    total_ref = int(gilt_ref_count.iloc[0]["total"]) if not gilt_ref_count.empty else 0
+    unpriced_count = max(0, total_ref - len(gilt_ranking))
+    if unpriced_count:
+        warnings.append(
+            f"{unpriced_count} gilt(s) have no current price in the market snapshot"
+        )
+    no_analytics = int(gilt_ranking["gry_pct"].isna().sum())
+    if no_analytics:
+        warnings.append(
+            f"{no_analytics} gilt(s) have a price but missing GRY analytics"
+            " — analytics refresh may be needed"
+        )
+    return warnings
 
 
 def enrich_holdings_with_latest_non_gilt_prices(
@@ -901,8 +928,10 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
     )
 
 
-def render_gilt_ranking_card(df: pd.DataFrame) -> None:
+def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None) -> None:
     st.subheader("Conventional Gilt Ranking")
+    for w in warnings or []:
+        st.warning(w)
     if df.empty:
         st.info(
             "No conventional gilt prices available yet. "
@@ -1113,7 +1142,10 @@ def render_duration_liquidity_signal_card(
 
 def render_signals_tab(state: dict[str, Any]) -> None:
     st.subheader("Signals")
-    render_gilt_ranking_card(state["gilt_ranking"])
+    render_gilt_ranking_card(
+        state["gilt_ranking"],
+        warnings=state.get("gilt_candidate_warnings"),
+    )
     st.divider()
     erp_threshold_pct = float(st.session_state.get(ERP_THRESHOLD_KEY, 0.0))
     render_equity_macro_signal_card(
