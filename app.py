@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from io import BytesIO
+import json
 import os
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import pandas as pd
@@ -29,6 +31,7 @@ from investment_optimiser.equity_signals import (
     evaluate_erp_signal,
     evaluate_yield_curve_shape_signal,
 )
+from investment_optimiser.decision_log import insert_decision
 from investment_optimiser.policy_pack import load_policy_pack
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
@@ -167,7 +170,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
 
     active_signal_rows = connection.query(
         """
-        SELECT alert_type, severity, message, started_at
+        SELECT id, alert_type, severity, message, started_at
         FROM signal_events
         WHERE cleared_at IS NULL
         ORDER BY started_at DESC
@@ -200,10 +203,9 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
     )
     decision_rows = connection.query(
         """
-        SELECT decision_date, action, notes, created_at
+        SELECT id, decision_date, action, instruments_affected, notes, signal_event_id, created_at
         FROM decision_log
         ORDER BY created_at DESC
-        LIMIT 8
         """,
         ttl=60,
     )
@@ -1052,17 +1054,60 @@ def render_scenarios_tab(state: dict[str, Any]) -> None:
     st.dataframe(refresh_frame, width="stretch", hide_index=True)
 
 
-def render_decision_log_tab(state: dict[str, Any]) -> None:
+def render_decision_log_tab(state: dict[str, Any], database_url: str) -> None:
     st.subheader("Decision Log")
-    decision_count = int(state["summary"]["decision_count"] or 0)
-    st.write(
-        f"There are `{decision_count}` decision-log entries persisted so far. "
-        "This append-only tab is already pointed at the real `decision_log` table."
-    )
-    if state["decisions"].empty:
+
+    decisions = state["decisions"]
+    if decisions.empty:
         st.info("No decisions have been logged yet.")
     else:
-        st.dataframe(state["decisions"], width="stretch", hide_index=True)
+        display = decisions[["decision_date", "action", "instruments_affected", "notes", "signal_event_id", "created_at"]].copy()
+        display["instruments_affected"] = display["instruments_affected"].apply(
+            lambda v: ", ".join(json.loads(v)) if pd.notna(v) and v else ""
+        )
+        st.dataframe(display, width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Log a decision")
+
+    holdings = state["holdings"]
+    symbols = sorted(holdings["symbol"].dropna().tolist()) if not holdings.empty else []
+
+    active_signals = state["active_signals"]
+    signal_options = ["(none)"]
+    signal_id_map: dict[str, int | None] = {"(none)": None}
+    if not active_signals.empty:
+        for _, row in active_signals.iterrows():
+            label = f"{row['alert_type']} — {row['message'][:60]}"
+            signal_options.append(label)
+            signal_id_map[label] = int(row["id"])
+
+    with st.form("log_decision", clear_on_submit=True):
+        decision_date = st.date_input("Date", value=date.today())
+        action = st.selectbox("Action", ["acted", "passed", "deferred"])
+        instruments = st.multiselect("Instruments affected", options=symbols, default=[])
+        signal_label = st.selectbox("Link to signal event (optional)", options=signal_options)
+        notes = st.text_area("Notes")
+        submitted = st.form_submit_button("Log decision")
+
+    if submitted:
+        db_path = sqlite_path_from_url(database_url)
+        write_conn = sqlite3.connect(str(db_path))
+        try:
+            insert_decision(
+                write_conn,
+                decision_date=decision_date.isoformat(),
+                action=action,
+                instruments_affected=instruments,
+                notes=notes,
+                signal_event_id=signal_id_map.get(signal_label),
+                created_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            write_conn.commit()
+        finally:
+            write_conn.close()
+        st.cache_data.clear()
+        st.rerun()
 
 
 def main() -> None:
@@ -1092,7 +1137,7 @@ def main() -> None:
     with scenarios_tab:
         render_scenarios_tab(state)
     with decision_log_tab:
-        render_decision_log_tab(state)
+        render_decision_log_tab(state, database_url)
 
 
 if __name__ == "__main__":
