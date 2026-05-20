@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 import sqlite3
 
@@ -9,6 +8,78 @@ import pandas as pd
 from investment_optimiser.db import initialize_database
 from investment_optimiser.portfolio_import import Holding, replace_portfolio_snapshot
 from investment_optimiser.yfinance_equities import yfinance_equities_handler
+
+
+def test_yfinance_equities_handler_prefers_live_quote_over_daily_bar(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-19",
+        holdings=[
+            Holding(
+                symbol="IGG",
+                name="IG Group Holdings",
+                asset_type="equity",
+                qty=541.0,
+                clean_price_gbp=15.76,
+                market_value_gbp=8526.16,
+                book_cost_gbp=8000.0,
+            ),
+        ],
+    )
+
+    stale_daily_frame = pd.DataFrame(
+        {
+            ("Close", "IGG.L"): [15.76],
+            ("Volume", "IGG.L"): [2856732],
+        },
+        index=pd.Index([pd.Timestamp("2026-05-19")], name="Date"),
+    )
+
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._download_price_frame",
+        lambda _tickers: stale_daily_frame,
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._download_errors",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_live_quote_row",
+        lambda _ticker: {
+            "close": 17.42,
+            "volume": 2856732,
+            "quote_date": "2026-05-19",
+            "currency": "GBP",
+        },
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_benchmark_pe",
+        lambda _ticker: None,
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        warning_messages = yfinance_equities_handler(connection)
+        rows = connection.execute(
+            """
+            SELECT cache_date, ticker, close_price_gbp, volume
+            FROM equity_price_cache
+            ORDER BY ticker ASC
+            """
+        ).fetchall()
+
+    assert rows == [
+        ("2026-05-19", "IGG.L", 17.42, 2856732),
+    ]
+    assert warning_messages == [
+        "SWRD.L trailingPE unavailable from Yahoo Finance; equity_valuation_cache not updated.",
+    ]
 
 
 def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
@@ -53,11 +124,6 @@ def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
         ],
     )
 
-    class FakeDate(date):
-        @classmethod
-        def today(cls) -> date:
-            return cls(2026, 5, 19)
-
     price_frame = pd.DataFrame(
         {
             ("Close", "REL.L"): [24.62, 24.80],
@@ -71,7 +137,6 @@ def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
         ),
     )
 
-    monkeypatch.setattr("investment_optimiser.yfinance_equities.date", FakeDate)
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._download_price_frame",
         lambda _tickers: price_frame,
@@ -83,6 +148,14 @@ def test_yfinance_equities_handler_persists_usable_rows_and_returns_warnings(
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._fetch_quote_currency",
         lambda ticker: "GBp" if ticker == "REL.L" else "GBP",
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_live_quote_row",
+        lambda _ticker: None,
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._utc_today",
+        lambda: "2026-05-19",
     )
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._fetch_benchmark_pe",
@@ -132,11 +205,6 @@ def test_yfinance_equities_handler_persists_benchmark_pe(
         ],
     )
 
-    class FakeDate(date):
-        @classmethod
-        def today(cls) -> date:
-            return cls(2026, 5, 19)
-
     price_frame = pd.DataFrame(
         {
             ("Close", "REL.L"): [24.62, 24.80],
@@ -148,7 +216,6 @@ def test_yfinance_equities_handler_persists_benchmark_pe(
         ),
     )
 
-    monkeypatch.setattr("investment_optimiser.yfinance_equities.date", FakeDate)
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._download_price_frame",
         lambda _tickers: price_frame,
@@ -160,6 +227,14 @@ def test_yfinance_equities_handler_persists_benchmark_pe(
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._fetch_quote_currency",
         lambda _ticker: "GBp",
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._fetch_live_quote_row",
+        lambda _ticker: None,
+    )
+    monkeypatch.setattr(
+        "investment_optimiser.yfinance_equities._utc_today",
+        lambda: "2026-05-19",
     )
     monkeypatch.setattr(
         "investment_optimiser.yfinance_equities._fetch_benchmark_pe",

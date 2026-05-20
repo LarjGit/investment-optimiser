@@ -231,6 +231,70 @@ def test_portfolio_tab_reads_persisted_non_gilt_prices_from_equity_cache(
     assert pd.isna(mmf_row["refreshed_market_value_gbp"])
 
 
+def test_portfolio_tab_prefers_most_recently_fetched_equity_price_row(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-20",
+        holdings=[
+            Holding(
+                symbol="IGG",
+                name="IG Group Holdings",
+                asset_type="equity",
+                qty=541.0,
+                clean_price_gbp=15.76,
+                market_value_gbp=8526.16,
+                book_cost_gbp=8000.0,
+            ),
+        ],
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO equity_price_cache (
+                cache_date,
+                ticker,
+                close_price_gbp,
+                volume,
+                fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("2026-05-20", "IGG.L", 15.76, 2856732, "2026-05-20T00:11:56Z"),
+        )
+        connection.execute(
+            """
+            INSERT INTO equity_price_cache (
+                cache_date,
+                ticker,
+                close_price_gbp,
+                volume,
+                fetched_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("2026-05-19", "IGG.L", 17.42, 327282, "2026-05-20T00:27:17Z"),
+        )
+        connection.commit()
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {"db": {"url": database_url}}
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    holdings_frame = app.dataframe[0].value
+    igg_row = holdings_frame.loc[holdings_frame["symbol"] == "IGG"].iloc[0]
+
+    assert round(float(igg_row["refreshed_market_value_gbp"]), 2) == 9424.22
+    assert igg_row["refreshed_price_date"] == "2026-05-19"
+
+
 def test_signals_tab_renders_gilt_ranking_with_seeded_analytics(tmp_path: Path) -> None:
     db_path = tmp_path / "investment_optimiser.db"
     database_url = f"sqlite:///{db_path.as_posix()}"

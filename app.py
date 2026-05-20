@@ -390,7 +390,7 @@ def enrich_holdings_with_latest_non_gilt_prices(
                 close_price_gbp,
                 ROW_NUMBER() OVER (
                     PARTITION BY ticker
-                    ORDER BY cache_date DESC, fetched_at DESC
+                    ORDER BY fetched_at DESC, cache_date DESC
                 ) AS row_number
             FROM equity_price_cache
         )

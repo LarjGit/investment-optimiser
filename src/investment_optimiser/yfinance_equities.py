@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 import sqlite3
 
 import pandas as pd
@@ -20,7 +20,7 @@ NON_GILT_PRICE_ASSET_TYPES = (
 
 
 def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
-    cache_date = date.today().isoformat()
+    cache_date = _utc_today()
     fetched_at = _utc_now()
     tickers = _load_refresh_tickers(connection)
     if not tickers:
@@ -34,8 +34,11 @@ def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
     warning_messages: list[str] = []
 
     for ticker in tickers:
-        latest_row = latest_rows.get(ticker)
-        if latest_row is None:
+        price_row = _fetch_live_quote_row(ticker)
+        if price_row is None:
+            price_row = latest_rows.get(ticker)
+
+        if price_row is None:
             warning_messages.append(
                 f"{ticker} price refresh failed: "
                 f"{download_errors.get(ticker, 'No usable daily close was returned')}"
@@ -43,9 +46,10 @@ def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
             continue
 
         try:
+            quote_currency = str(price_row.get("currency") or _fetch_quote_currency(ticker))
             close_price_gbp = _normalize_close_price(
-                float(latest_row["close"]),
-                _fetch_quote_currency(ticker),
+                float(price_row["close"]),
+                quote_currency,
             )
         except Exception as exc:
             warning_messages.append(f"{ticker} price refresh failed: {exc}")
@@ -53,10 +57,10 @@ def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
 
         rows_to_upsert.append(
             (
-                cache_date,
+                str(price_row["quote_date"]),
                 ticker,
                 close_price_gbp,
-                _coerce_int(latest_row["volume"]),
+                _coerce_int(price_row["volume"]),
                 fetched_at,
             )
         )
@@ -167,6 +171,44 @@ def _fetch_quote_currency(ticker: str) -> str:
     import yfinance as yf
 
     ticker_object = yf.Ticker(ticker)
+    return _quote_currency_from_ticker_object(ticker_object)
+
+
+def _fetch_live_quote_row(ticker: str) -> dict[str, object] | None:
+    try:
+        import yfinance as yf
+
+        ticker_object = yf.Ticker(ticker)
+        intraday_frame = ticker_object.history(
+            period="1d",
+            interval="1m",
+            actions=False,
+            auto_adjust=False,
+            prepost=True,
+        )
+        if intraday_frame.empty or "Close" not in intraday_frame.columns:
+            return None
+
+        close_series = intraday_frame["Close"].dropna()
+        if close_series.empty:
+            return None
+
+        latest_index = close_series.index[-1]
+        volume_value: object = None
+        if "Volume" in intraday_frame.columns:
+            volume_value = intraday_frame.at[latest_index, "Volume"]
+
+        return {
+            "close": close_series.iloc[-1],
+            "volume": volume_value,
+            "quote_date": _quote_date_from_index(latest_index),
+            "currency": _quote_currency_from_ticker_object(ticker_object),
+        }
+    except Exception:
+        return None
+
+
+def _quote_currency_from_ticker_object(ticker_object: object) -> str:
     fast_info = getattr(ticker_object, "fast_info", None)
     if fast_info is not None:
         currency = fast_info.get("currency")
@@ -213,6 +255,7 @@ def _extract_latest_rows(
         latest_rows[ticker] = {
             "close": close_series.iloc[-1],
             "volume": volume_value,
+            "quote_date": _quote_date_from_index(latest_index),
         }
 
     return latest_rows
@@ -240,6 +283,11 @@ def _coerce_int(value: object) -> int | None:
     return int(value)
 
 
+def _quote_date_from_index(value: object) -> str:
+    timestamp = pd.Timestamp(value)
+    return timestamp.date().isoformat()
+
+
 def _benchmark_ticker_from_policy() -> str:
     fields = load_policy_pack().get("shared_assumption_schema", {}).get("fields", [])
     match = next((f for f in fields if f.get("key") == "benchmark_ticker"), None)
@@ -261,3 +309,7 @@ def _fetch_benchmark_pe(ticker: str) -> float | None:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _utc_today() -> str:
+    return datetime.now(UTC).date().isoformat()
