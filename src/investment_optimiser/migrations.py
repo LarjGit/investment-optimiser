@@ -428,6 +428,18 @@ def allow_gilt_price_cache_rows_without_analytics(
     )
 
 
+def add_portfolio_snapshot_maturity_date(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(portfolio_snapshots)")
+    }
+    if "maturity_date" in existing_columns:
+        return
+    connection.execute(
+        "ALTER TABLE portfolio_snapshots ADD COLUMN maturity_date TEXT"
+    )
+
+
 def create_strategic_baseline_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -457,4 +469,5 @@ MIGRATIONS: list[Migration] = [
     allow_gilt_price_cache_rows_without_analytics,
     add_gilt_analytics_refresh_source,
     create_strategic_baseline_table,
+    add_portfolio_snapshot_maturity_date,
 ]

@@ -43,6 +43,7 @@ class Holding:
     market_value_gbp: float
     book_cost_gbp: float | None
     import_warning: str | None = None
+    maturity_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,18 +58,21 @@ class _ClassifiedAsset:
     asset_type: str
     isin: str | None = None
     warning: str | None = None
+    maturity_date: str | None = None
 
 
 @dataclass(frozen=True)
 class _PersistedHolding:
     holding: Holding
     isin: str | None = None
+    maturity_date: str | None = None
 
 
 @dataclass(frozen=True)
 class _GiltReference:
     isin: str
     instrument_type: str
+    maturity_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,8 +173,9 @@ def replace_portfolio_snapshot(
                     market_value_gbp,
                     book_cost_gbp,
                     import_warning,
-                    weight_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    weight_pct,
+                    maturity_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -188,6 +193,7 @@ def replace_portfolio_snapshot(
                             persisted_holding.holding.market_value_gbp,
                             total_market_value,
                         ),
+                        persisted_holding.maturity_date,
                     )
                     for persisted_holding in persisted_rows
                 ],
@@ -210,7 +216,8 @@ def fetch_portfolio_snapshot(
                 clean_price_gbp,
                 market_value_gbp,
                 book_cost_gbp,
-                import_warning
+                import_warning,
+                maturity_date
             FROM portfolio_snapshots
             WHERE snapshot_date = ?
             ORDER BY market_value_gbp DESC, symbol ASC
@@ -228,6 +235,7 @@ def fetch_portfolio_snapshot(
             market_value_gbp=row[5],
             book_cost_gbp=row[6],
             import_warning=row[7],
+            maturity_date=row[8],
         )
         for row in rows
     ]
@@ -321,8 +329,10 @@ def _normalize_holding(
             market_value_gbp=_parse_number(str(row["market_value_gbp"]).strip()),
             book_cost_gbp=_parse_optional_number(str(row["book_cost_gbp"]).strip()),
             import_warning=" ".join(warnings) or None,
+            maturity_date=classified_asset.maturity_date,
         ),
         isin=classified_asset.isin,
+        maturity_date=classified_asset.maturity_date,
     )
 
 
@@ -352,6 +362,7 @@ def _classify_asset_type(
             return _ClassifiedAsset(
                 asset_type="gilt_conventional",
                 isin=gilt_reference.isin,
+                maturity_date=gilt_reference.maturity_date,
             )
         return _ClassifiedAsset(
             asset_type="gilt_index_linked",
@@ -455,15 +466,15 @@ def _fetch_gilt_reference_by_tidm(
     with _connect_database(database_path) as connection:
         rows = connection.execute(
             """
-            SELECT tidm, isin, instrument_type
+            SELECT tidm, isin, instrument_type, maturity_date
             FROM gilt_reference
             WHERE tidm IS NOT NULL
             """
         ).fetchall()
 
     return {
-        tidm: _GiltReference(isin=isin, instrument_type=instrument_type)
-        for tidm, isin, instrument_type in rows
+        tidm: _GiltReference(isin=isin, instrument_type=instrument_type, maturity_date=maturity_date)
+        for tidm, isin, instrument_type, maturity_date in rows
     }
 
 

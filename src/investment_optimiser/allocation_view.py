@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -8,10 +11,22 @@ if TYPE_CHECKING:
     import pandas.io.formats.style as _style
 
 
-def enrich_with_buckets(holdings_df: pd.DataFrame) -> pd.DataFrame:
+def enrich_with_buckets(
+    holdings_df: pd.DataFrame,
+    *,
+    reference_date: date | None = None,
+) -> pd.DataFrame:
     if holdings_df.empty:
         return holdings_df.assign(bucket_id=pd.Series(dtype=str), resolution_method=pd.Series(dtype=str))
+    today = reference_date or date.today()
     rows = holdings_df.to_dict("records")
+    for row in rows:
+        if row.get("maturity_date") and row.get("maturity_years") is None:
+            try:
+                mat = date.fromisoformat(str(row["maturity_date"]))
+                row["maturity_years"] = (mat - today).days / 365.25
+            except (ValueError, TypeError):
+                pass
     resolutions = [assign_bucket(r) for r in rows]
     return holdings_df.assign(
         bucket_id=[r.bucket_id for r in resolutions],

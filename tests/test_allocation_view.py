@@ -1,7 +1,9 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
-from investment_optimiser.allocation_view import build_allocation_table
+from investment_optimiser.allocation_view import build_allocation_table, enrich_with_buckets
 
 BUCKET_LABELS = {
     "liquidity_reserve": "Liquidity reserve",
@@ -100,3 +102,34 @@ def test_bucket_labels_mapped_correctly():
     result = build_allocation_table(holdings, BASELINE, BUCKET_LABELS)
     equity_row = result[result["bucket_id"] == "listed_risk_assets"].iloc[0]
     assert equity_row["label"] == "Equities"
+
+
+# --- Maturity date → maturity_years enrichment ---
+
+
+def test_short_gilt_classified_from_maturity_date():
+    # 2027-06-07 is ~1.05 years from 2026-05-20 → short_duration
+    holdings = pd.DataFrame([{
+        "symbol": "TR27",
+        "instrument_name": "Treasury 2027",
+        "asset_type": "gilt_conventional",
+        "market_value_gbp": 5000.0,
+        "maturity_date": "2027-06-07",
+        "maturity_years": None,
+    }])
+    enriched = enrich_with_buckets(holdings, reference_date=date(2026, 5, 20))
+    assert enriched.iloc[0]["bucket_id"] == "short_duration_nominal_gilts"
+
+
+def test_long_gilt_classified_from_maturity_date():
+    # 2045-01-22 is ~18.7 years from 2026-05-20 → long_duration
+    holdings = pd.DataFrame([{
+        "symbol": "TR45",
+        "instrument_name": "Treasury 2045",
+        "asset_type": "gilt_conventional",
+        "market_value_gbp": 8000.0,
+        "maturity_date": "2045-01-22",
+        "maturity_years": None,
+    }])
+    enriched = enrich_with_buckets(holdings, reference_date=date(2026, 5, 20))
+    assert enriched.iloc[0]["bucket_id"] == "long_duration_nominal_gilts"

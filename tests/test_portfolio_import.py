@@ -211,6 +211,7 @@ def test_import_ii_portfolio_snapshot_classifies_assets_and_persists_warnings(
             market_value_gbp=9912.0,
             book_cost_gbp=10000.0,
             import_warning=None,
+            maturity_date="2027-03-07",
         ),
         Holding(
             symbol="VUAG",
@@ -370,3 +371,42 @@ def test_load_ii_holdings_uses_symbol_overrides_before_name_heuristics(
             import_warning=None,
         )
     ]
+
+
+def test_gilt_maturity_date_stored_and_round_trips(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    initialize_database(database_url)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO gilt_reference (
+                isin, tidm, instrument_name, coupon_pct, maturity_date,
+                dividend_months, dividend_day, ex_div_date,
+                instrument_type, maturity_bracket, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("GB00BMF9LJ15", "TR27", "Treasury 2027", 4.25, "2027-03-07",
+             "03,09", 7, "2026-08-27", "Conventional", "0-5y", "2026-05-20T09:00:00Z"),
+        )
+
+    uploaded_csv = BytesIO(
+        "Symbol,Name,Quantity,Price,Value,Book Cost\n"
+        "TR27,4¼% Treasury Gilt 2027,100,GBP99.12,\"9,912.00\",\"10,000.00\"\n".encode("utf-8")
+    )
+    import_ii_portfolio_snapshot(database_url, uploaded_csv, snapshot_date="2026-05-20")
+
+    holdings = fetch_portfolio_snapshot(database_url, snapshot_date="2026-05-20")
+    assert len(holdings) == 1
+    assert holdings[0] == Holding(
+        symbol="TR27",
+        name="4¼% Treasury Gilt 2027",
+        asset_type="gilt_conventional",
+        qty=100.0,
+        clean_price_gbp=99.12,
+        market_value_gbp=9912.0,
+        book_cost_gbp=10000.0,
+        import_warning=None,
+        maturity_date="2027-03-07",
+    )
