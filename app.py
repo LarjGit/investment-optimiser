@@ -33,6 +33,10 @@ from investment_optimiser.equity_signals import (
 )
 from investment_optimiser.decision_log import insert_decision
 from investment_optimiser.policy_pack import load_policy_pack
+from investment_optimiser.strategic_baseline import (
+    BaselineRecord,
+    insert_baseline,
+)
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -63,6 +67,8 @@ ERP_THRESHOLD_KEY = "erp_threshold_pct"
 DURATION_FLOOR_KEY = "duration_floor_years"
 DURATION_CEILING_KEY = "duration_ceiling_years"
 LIQUIDITY_THRESHOLD_KEY = "liquidity_concentration_10y_plus_pct"
+BASELINE_EDITING_KEY = "baseline_editing"
+BASELINE_EDITOR_KEY_COUNTER = "baseline_editor_key_counter"
 
 
 def _policy_field_default(key: str) -> object:
@@ -354,6 +360,26 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         ttl=60,
     )
 
+    baseline_rows = connection.query(
+        """
+        SELECT created_at, label, policy_version, weights_json, notes
+        FROM strategic_baseline
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        ttl=60,
+    )
+    current_baseline: BaselineRecord | None = None
+    if not baseline_rows.empty:
+        row = baseline_rows.iloc[0]
+        current_baseline = BaselineRecord(
+            created_at=row["created_at"],
+            label=row["label"],
+            policy_version=row["policy_version"],
+            weights=json.loads(row["weights_json"]),
+            notes=row["notes"] if pd.notna(row["notes"]) else None,
+        )
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -365,6 +391,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "yield_curve": yield_curve,
         "yield_curve_history": yield_curve_history,
         "duration_liquidity_rows": duration_liquidity_rows,
+        "current_baseline": current_baseline,
     }
 
 
@@ -1042,7 +1069,136 @@ def render_signals_tab(state: dict[str, Any]) -> None:
         st.dataframe(state["active_signals"], width="stretch", hide_index=True)
 
 
-def render_scenarios_tab(state: dict[str, Any]) -> None:
+def render_baseline_section(
+    state: dict[str, Any], database_url: str
+) -> None:
+    st.subheader("Strategic baseline")
+
+    pack = load_policy_pack()
+    buckets = pack["baseline_bucket_model"]["buckets"]
+    bucket_ids = [b["id"] for b in buckets]
+    bucket_labels = [b["label"] for b in buckets]
+
+    current_baseline: BaselineRecord | None = state["current_baseline"]
+    editing = st.session_state.get(BASELINE_EDITING_KEY, False)
+    editor_counter = st.session_state.get(BASELINE_EDITOR_KEY_COUNTER, 0)
+
+    if not editing:
+        if current_baseline is None:
+            st.info(
+                "No strategic baseline has been saved yet. "
+                "Set target weights for each asset bucket below."
+            )
+        else:
+            display_rows = [
+                {"Bucket": label, "Weight (%)": current_baseline.weights.get(bid, 0.0)}
+                for bid, label in zip(bucket_ids, bucket_labels)
+            ]
+            st.dataframe(
+                pd.DataFrame(display_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(
+                f"Label: **{current_baseline.label}** · "
+                f"Saved: {current_baseline.created_at[:10]}"
+                + (f" · {current_baseline.notes}" if current_baseline.notes else "")
+            )
+
+        if st.button(
+            "Edit baseline" if current_baseline else "Create baseline",
+            key="baseline_edit_btn",
+        ):
+            st.session_state[BASELINE_EDITING_KEY] = True
+            st.rerun()
+        return
+
+    if current_baseline is not None:
+        initial_weights = [
+            current_baseline.weights.get(bid, 0.0) for bid in bucket_ids
+        ]
+    else:
+        equal_w = round(100.0 / len(buckets), 1)
+        initial_weights = [equal_w] * len(buckets)
+
+    editor_df = pd.DataFrame(
+        {"Bucket": bucket_labels, "Weight (%)": initial_weights}
+    )
+    editor_df["Weight (%)"] = editor_df["Weight (%)"].astype(float)
+
+    label_default = current_baseline.label if current_baseline else ""
+    notes_default = (current_baseline.notes or "") if current_baseline else ""
+
+    with st.form("baseline_editor_form", clear_on_submit=False):
+        label = st.text_input(
+            "Baseline label",
+            value=label_default,
+            placeholder="e.g. initial, defensive_tilt, post_review",
+        )
+        notes = st.text_input("Notes (optional)", value=notes_default)
+        edited_df = st.data_editor(
+            editor_df,
+            key=f"baseline_editor_{editor_counter}",
+            column_config={
+                "Bucket": st.column_config.TextColumn("Bucket", disabled=True),
+                "Weight (%)": st.column_config.NumberColumn(
+                    "Weight (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1,
+                    format="%.1f",
+                ),
+            },
+            num_rows="fixed",
+            use_container_width=True,
+        )
+        total = float(edited_df["Weight (%)"].sum())
+        st.caption(f"Total: {total:.1f}%")
+        col1, col2 = st.columns(2)
+        with col1:
+            save = st.form_submit_button("Save baseline")
+        with col2:
+            cancel = st.form_submit_button("Cancel")
+
+    if cancel:
+        st.session_state[BASELINE_EDITING_KEY] = False
+        st.session_state[BASELINE_EDITOR_KEY_COUNTER] = editor_counter + 1
+        st.rerun()
+
+    if save:
+        if not label.strip():
+            st.error("Baseline label must not be empty.")
+            return
+
+        edited_weights = {
+            bid: float(w)
+            for bid, w in zip(bucket_ids, edited_df["Weight (%)"])
+        }
+        try:
+            record = BaselineRecord(
+                created_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                label=label.strip(),
+                policy_version=pack["policy_version"],
+                weights=edited_weights,
+                notes=notes.strip() or None,
+            )
+            db_path = sqlite_path_from_url(database_url)
+            with sqlite3.connect(str(db_path)) as conn:
+                insert_baseline(conn, record)
+                conn.commit()
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+        st.session_state[BASELINE_EDITING_KEY] = False
+        st.session_state[BASELINE_EDITOR_KEY_COUNTER] = editor_counter + 1
+        st.cache_data.clear()
+        st.rerun()
+
+
+def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
+    render_baseline_section(state, database_url)
+    st.divider()
     st.subheader("Scenarios")
     allocation_run_count = int(state["summary"]["allocation_run_count"] or 0)
     st.write(
@@ -1135,7 +1291,7 @@ def main() -> None:
     with signals_tab:
         render_signals_tab(state)
     with scenarios_tab:
-        render_scenarios_tab(state)
+        render_scenarios_tab(state, database_url)
     with decision_log_tab:
         render_decision_log_tab(state, database_url)
 
