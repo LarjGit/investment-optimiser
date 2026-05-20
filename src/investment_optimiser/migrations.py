@@ -428,6 +428,27 @@ def allow_gilt_price_cache_rows_without_analytics(
     )
 
 
+def create_strategic_baseline_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategic_baseline (
+            id             INTEGER PRIMARY KEY,
+            created_at     TEXT    NOT NULL,
+            label          TEXT    NOT NULL,
+            policy_version TEXT    NOT NULL,
+            weights_json   TEXT    NOT NULL CHECK (json_valid(weights_json)),
+            notes          TEXT
+        ) STRICT
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_strategic_baseline_created_at
+        ON strategic_baseline(created_at DESC)
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -435,4 +456,5 @@ MIGRATIONS: list[Migration] = [
     add_non_gilt_reference_refresh_source,
     allow_gilt_price_cache_rows_without_analytics,
     add_gilt_analytics_refresh_source,
+    create_strategic_baseline_table,
 ]
