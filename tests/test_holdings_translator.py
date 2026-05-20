@@ -176,9 +176,10 @@ def test_output_dataframe_has_required_columns():
         reference_date=REFERENCE_DATE,
     )
     required = {
-        "symbol", "isin", "bucket_id", "is_new_position",
+        "symbol", "isin", "bucket_id", "asset_type", "is_new_position",
         "current_value_gbp", "current_weight_pct",
         "target_value_gbp", "target_weight_pct", "delta_value_gbp",
     }
     assert required.issubset(set(result.target_df.columns))
+    assert result.target_df.iloc[0]["asset_type"] == "equity"
     assert set(result.bucket_summary.columns) == {"bucket_id", "current_pct", "target_pct", "delta_pct"}

@@ -79,6 +79,7 @@ def _scale_existing(
             "symbol": h.get("symbol"),
             "isin": h.get("isin"),
             "bucket_id": bucket_id,
+            "asset_type": h.get("asset_type"),
             "is_new_position": False,
             "current_value_gbp": current_val,
             "current_weight_pct": current_val / total_portfolio_value_gbp * 100.0,
@@ -145,6 +146,7 @@ def _passthrough_row(h: pd.Series, total_portfolio_value_gbp: float) -> dict:
         "symbol": h.get("symbol"),
         "isin": h.get("isin"),
         "bucket_id": h.get("bucket_id"),
+        "asset_type": h.get("asset_type"),
         "is_new_position": False,
         "current_value_gbp": current_val,
         "current_weight_pct": weight_pct,
@@ -165,6 +167,7 @@ def _new_position_row(
         "symbol": instrument_name,
         "isin": isin,
         "bucket_id": bucket_id,
+        "asset_type": "gilt_conventional",
         "is_new_position": True,
         "current_value_gbp": 0.0,
         "current_weight_pct": 0.0,
@@ -179,6 +182,7 @@ def _sentinel_row(bucket_id: str, target_value: float, total_portfolio_value_gbp
         "symbol": None,
         "isin": None,
         "bucket_id": bucket_id,
+        "asset_type": None,
         "is_new_position": False,
         "current_value_gbp": 0.0,
         "current_weight_pct": 0.0,
@@ -191,7 +195,7 @@ def _sentinel_row(bucket_id: str, target_value: float, total_portfolio_value_gbp
 def _build_target_df(rows: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=[
-            "symbol", "isin", "bucket_id", "is_new_position",
+            "symbol", "isin", "bucket_id", "asset_type", "is_new_position",
             "current_value_gbp", "current_weight_pct",
             "target_value_gbp", "target_weight_pct", "delta_value_gbp",
         ])
