@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import sqlite3
 
 import pytest
 
 from investment_optimiser.db import initialize_database
-from investment_optimiser.gilt_signals import fetch_gilt_ranking
+from investment_optimiser.gilt_signals import build_gilt_candidate_universe, fetch_gilt_ranking
 
 
 def _seed_reference(
@@ -128,3 +129,110 @@ def test_fetch_gilt_ranking_scopes_to_latest_cache_date(db: sqlite3.Connection) 
 
     assert len(df) == 1
     assert float(df.iloc[0]["gry_pct"]) == pytest.approx(0.0425)
+
+
+# --- build_gilt_candidate_universe ---
+
+
+_REF_DATE = date(2026, 5, 20)
+
+
+def test_build_universe_empty_reference_returns_empty(db: sqlite3.Connection) -> None:
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert df.empty
+    assert warnings == []
+
+
+def test_build_universe_fully_priced_gilt_no_warnings(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_name="Treasury 4% 2030", maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0425, modified_duration_years=4.5, maturity_date="2030-06-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert len(df) == 1
+    assert df.iloc[0]["isin"] == "GB00B54HL0K3"
+    assert warnings == []
+
+
+def test_build_universe_unpriced_gilt_excluded_with_warning(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_name="Treasury 4% 2030", maturity_date="2030-06-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert df.empty
+    assert len(warnings) == 1
+    assert "no current price" in warnings[0]
+
+
+def test_build_universe_price_only_gilt_in_frame_with_analytics_warning(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_name="Treasury 4% 2030", maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=None, modified_duration_years=None, maturity_date="2030-06-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert len(df) == 1
+    assert df.iloc[0]["isin"] == "GB00B54HL0K3"
+    assert any("missing GRY analytics" in w for w in warnings)
+
+
+def test_build_universe_maturity_cutoff_excludes_gilt_with_warning(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", maturity_date="2030-06-07")   # within 5y of 2026-05-20
+    _seed_reference(db, isin="GB00BFWFPL34", maturity_date="2031-12-07")   # beyond 5y of 2026-05-20
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0425, modified_duration_years=4.5, maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00BFWFPL34", gry_pct=0.0390, modified_duration_years=5.3, maturity_date="2031-12-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db, max_maturity_years=5.0, reference_date=_REF_DATE)
+
+    assert len(df) == 1
+    assert df.iloc[0]["isin"] == "GB00B54HL0K3"
+    assert any("maturity" in w.lower() and "cutoff" in w.lower() for w in warnings)
+
+
+def test_build_universe_index_linked_always_excluded(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_type="Conventional", maturity_date="2030-06-07")
+    _seed_reference(db, isin="GB00B7L9SL19", instrument_type="Index-linked", maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0425, modified_duration_years=4.5)
+    _seed_price(db, isin="GB00B7L9SL19", gry_pct=0.011, modified_duration_years=15.0)
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert len(df) == 1
+    assert df.iloc[0]["isin"] == "GB00B54HL0K3"
+
+
+def test_build_universe_multiple_warnings_combined(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", maturity_date="2030-06-07")   # fully priced
+    _seed_reference(db, isin="GB00BFWFPL34", maturity_date="2029-07-22")   # unpriced
+    _seed_reference(db, isin="GB00B7F9SL34", maturity_date="2032-06-07")   # price, no analytics
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0425, modified_duration_years=4.5, maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00B7F9SL34", gry_pct=None, modified_duration_years=None, maturity_date="2032-06-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db)
+
+    assert len(df) == 2
+    assert any("no current price" in w for w in warnings)
+    assert any("missing GRY analytics" in w for w in warnings)
+
+
+def test_build_universe_sorted_gry_descending_nulls_last(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", maturity_date="2030-06-07")
+    _seed_reference(db, isin="GB00BFWFPL34", maturity_date="2029-07-22")
+    _seed_reference(db, isin="GB00B7F9SL34", maturity_date="2031-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0425, modified_duration_years=4.5, maturity_date="2030-06-07")
+    _seed_price(db, isin="GB00BFWFPL34", gry_pct=0.0510, modified_duration_years=2.8, maturity_date="2029-07-22")
+    _seed_price(db, isin="GB00B7F9SL34", gry_pct=None, modified_duration_years=None, maturity_date="2031-06-07")
+    db.commit()
+
+    df, _ = build_gilt_candidate_universe(db)
+
+    assert len(df) == 3
+    assert df.iloc[0]["isin"] == "GB00BFWFPL34"
+    assert df.iloc[1]["isin"] == "GB00B54HL0K3"
+    assert df.iloc[2]["isin"] == "GB00B7F9SL34"
