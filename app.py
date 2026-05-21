@@ -41,6 +41,11 @@ from investment_optimiser.allocation_view import build_allocation_table, enrich_
 from investment_optimiser.allocation_runs import insert_allocation_run
 from investment_optimiser.cash_allocator import build_cash_run_record, compute_cash_deployment
 from investment_optimiser.lp_recommendation import build_lp_recommendation
+from investment_optimiser.scenario_comparison import (
+    build_coverage_summary,
+    build_scenario_comparison_df,
+    compute_scenario_totals,
+)
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -1506,10 +1511,91 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
                 st.caption(f"⚠ {w}")
 
 
+def _render_scenario_comparison(database_url: str) -> None:
+    st.subheader("Scenario comparison")
+
+    connection = st.connection("db", type="sql", url=database_url)
+    recent = connection.query(
+        """
+        SELECT snapshot_json
+        FROM allocation_runs
+        WHERE solver_status = 'optimal'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        ttl=0,
+    )
+
+    if recent.empty:
+        st.info("No recommendation run found. Generate a recommendation above to see scenario comparison.")
+        return
+
+    snapshot = json.loads(recent.iloc[0]["snapshot_json"])
+    records = snapshot.get("outputs", {}).get("scenario_results", [])
+
+    if not records:
+        st.info("This run pre-dates scenario results. Generate a new recommendation to populate the comparison.")
+        return
+
+    scenario_names = sorted({r["scenario_name"] for r in records})
+    selected = st.selectbox("Scenario", options=scenario_names, key="scenario_compare_select")
+
+    totals = compute_scenario_totals(records, selected)
+    current_pnl = totals.get("current", 0.0)
+    rec_pnl = totals.get("executable_recommended", 0.0)
+    improvement = rec_pnl - current_pnl
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Current portfolio PnL", f"£{current_pnl:,.0f}")
+    col2.metric("Recommended portfolio PnL", f"£{rec_pnl:,.0f}")
+    col3.metric("Improvement", f"£{improvement:+,.0f}")
+
+    comparison_df = build_scenario_comparison_df(records, selected)
+    if not comparison_df.empty:
+        _COMPARISON_COL_LABELS: dict[str, str] = {
+            "holding_name": "Holding",
+            "asset_type": "Type",
+            "bucket_name": "Bucket",
+            "current_value_gbp_current": "Current value",
+            "current_value_gbp_executable_recommended": "Recommended value",
+            "scenario_value_gbp_current": "Scenario value (current)",
+            "scenario_value_gbp_executable_recommended": "Scenario value (recommended)",
+            "pnl_gbp_current": "PnL (current)",
+            "pnl_gbp_executable_recommended": "PnL (recommended)",
+        }
+        _TEXT_COLS = {"holding_name", "asset_type", "bucket_name"}
+        col_config = {
+            c: (
+                st.column_config.TextColumn(_COMPARISON_COL_LABELS.get(c, c))
+                if c in _TEXT_COLS
+                else st.column_config.NumberColumn(_COMPARISON_COL_LABELS.get(c, c), format="£%.0f")
+            )
+            for c in comparison_df.columns
+        }
+        st.dataframe(comparison_df, column_config=col_config, hide_index=True, use_container_width=True)
+
+    coverage = build_coverage_summary(records, selected)
+    if not coverage.empty:
+        with st.expander("Coverage disclosure"):
+            st.caption(
+                "Shows how each holding is priced under the scenario. "
+                "'exact' = full repricing model applied; "
+                "'held_flat' = capital held constant (e.g. MMF); "
+                "'unmodelled_held_flat' = no model available."
+            )
+            st.dataframe(
+                coverage.rename(columns={"portfolio_state": "State", "model_status": "Model", "count": "Holdings"}),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
 def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
     render_baseline_section(state, database_url)
     st.divider()
     _render_lp_recommendation(state, database_url)
+    st.divider()
+    _render_scenario_comparison(database_url)
     st.divider()
     _render_cash_recommendation(state, database_url)
     st.divider()

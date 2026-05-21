@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import sqlite3
 from typing import Any
 
@@ -96,7 +97,18 @@ def fetch_allocation_run(
 
 def dump_allocation_run_snapshot_json(snapshot: dict[str, Any]) -> str:
     validate_allocation_run_snapshot(snapshot)
-    return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_sanitise(snapshot), sort_keys=True, separators=(",", ":"))
+
+
+def _sanitise(obj: Any) -> Any:
+    """Recursively replace non-finite floats with None so the output is valid JSON."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitise(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitise(v) for v in obj]
+    return obj
 
 
 def validate_allocation_run_record(record: AllocationRunRecord) -> None:

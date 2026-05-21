@@ -155,7 +155,7 @@
     "baseline_tilt_band_pct": 10.0,
     "turnover_limit_pct_by_regime": {
       "constructive": 10.0,
-      "normal": 15.0,
+      "normal": 50.0,
       "defensive": 25.0
     },
     "duration_floor_years": 2.0,
