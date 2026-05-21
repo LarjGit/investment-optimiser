@@ -1531,10 +1531,28 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
                     st.table(rb_df)
 
     binding = diagnostics.get("binding_constraints", [])
+    binding_details = diagnostics.get("binding_constraint_details", [])
     warnings = diagnostics.get("warnings", [])
     if binding or warnings:
         with st.expander("Constraints and warnings"):
-            if binding:
+            if binding_details:
+                rows = [
+                    {
+                        "Constraint": d["label"],
+                        "Explanation": d["short"],
+                        "Shadow price": (
+                            f"{d['shadow_price']:.4f}" if d["shadow_price"] is not None else "—"
+                        ),
+                        "Status": "Near-binding" if d["status"] == "near_binding" else "Binding",
+                    }
+                    for d in binding_details
+                ]
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            elif binding:
                 st.caption("Binding constraints: " + ", ".join(binding))
             for w in warnings:
                 st.caption(f"⚠ {w}")

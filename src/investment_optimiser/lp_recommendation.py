@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from investment_optimiser.allocation_runs import ALLOCATION_RUN_SCHEMA_VERSION, AllocationRunRecord
+from investment_optimiser.constraint_explanations import explain_binding_constraints
 from investment_optimiser.friction_gate import apply_gate_to_proposed_state, gate_trades
 from investment_optimiser.holdings_translator import translate_bucket_targets_to_holdings
 from investment_optimiser.lp_solver import solve_bucket_weights
@@ -111,6 +112,11 @@ def build_lp_recommendation(
         enriched_holdings_df, executable_df, policy, gilt_ranking_df, reference_date=today
     )
 
+    bucket_labels = {b["id"]: b["label"] for b in policy["baseline_bucket_model"]["buckets"]}
+    constraint_details = explain_binding_constraints(
+        lp_result.binding_constraints, lp_result.marginals, policy, bucket_labels
+    )
+
     snapshot = _build_snapshot(
         policy=policy,
         baseline_label=baseline_label,
@@ -125,6 +131,8 @@ def build_lp_recommendation(
         executable_records=executable_df.to_dict("records"),
         recommended_allocations=recommended_allocations,
         binding_constraints=lp_result.binding_constraints,
+        binding_constraint_details=constraint_details,
+        marginals=lp_result.marginals,
         warnings=all_warnings,
         notes=lp_result.notes,
         scenario_results=scenario_results,
@@ -265,6 +273,8 @@ def _build_snapshot(
     binding_constraints: list[str],
     warnings: list[str],
     notes: list[str],
+    binding_constraint_details: list[dict] | None = None,
+    marginals: dict[str, float] | None = None,
     scenario_results: list[dict] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -293,6 +303,8 @@ def _build_snapshot(
         },
         "diagnostics": {
             "binding_constraints": binding_constraints,
+            "binding_constraint_details": binding_constraint_details or [],
+            "marginals": marginals or {},
             "warnings": warnings,
             "notes": notes,
         },
