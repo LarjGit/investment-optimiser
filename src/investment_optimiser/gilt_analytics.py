@@ -131,6 +131,51 @@ def compute_gry(
     return y, mod_dur
 
 
+def clean_price_from_gry(
+    gry_pct: float,
+    coupon_pct: float,
+    maturity_date: date,
+    settlement_date: date,
+) -> float | None:
+    """Forward formula: given GRY return clean price per £100 nominal."""
+    prev_coupon, future_coupons = coupon_dates(maturity_date, settlement_date)
+    if not future_coupons:
+        return None
+
+    next_coupon = future_coupons[0]
+    xd = ex_dividend_date(next_coupon)
+    accrued = _accrued_interest(coupon_pct, prev_coupon, next_coupon, settlement_date, xd)
+
+    c = coupon_pct
+    f = 2.0
+    d1 = c / f
+    d2 = c / f
+    n = len(future_coupons) - 1
+
+    r = (next_coupon - settlement_date).days
+    s = (next_coupon - prev_coupon).days
+
+    if settlement_date > xd:
+        d1 = 0.0
+
+    try:
+        v = 1.0 / (1.0 + gry_pct / f)
+        if n == 0:
+            dirty_price = (d1 + 100.0) * v ** (r / s)
+        else:
+            dirty_price = v ** (r / s) * (
+                d1
+                + d2 * v
+                + c * v**2 / (f * (1 - v)) * (1 - v ** (n - 1))
+                + 100.0 * v**n
+            )
+    except (ZeroDivisionError, ValueError, OverflowError):
+        return None
+
+    clean_price = dirty_price - accrued
+    return clean_price if clean_price > 0 else None
+
+
 def gilt_analytics_handler(connection: sqlite3.Connection) -> list[str]:
     cache_date = date.today().isoformat()
     settlement = settlement_date_for(date.today())

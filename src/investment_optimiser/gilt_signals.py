@@ -9,6 +9,7 @@ import pandas as pd
 _RANKING_SQL = """
     SELECT
         p.isin,
+        r.tidm,
         r.instrument_name,
         p.maturity_date,
         p.coupon_pct,
@@ -25,6 +26,7 @@ _RANKING_SQL = """
 _CANDIDATE_SQL = """
     SELECT
         r.isin,
+        r.tidm,
         r.instrument_name,
         r.maturity_date,
         r.coupon_pct,

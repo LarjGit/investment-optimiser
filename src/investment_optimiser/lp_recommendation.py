@@ -11,6 +11,7 @@ from investment_optimiser.friction_gate import apply_gate_to_proposed_state, gat
 from investment_optimiser.holdings_translator import translate_bucket_targets_to_holdings
 from investment_optimiser.lp_solver import solve_bucket_weights
 from investment_optimiser.risk_gate import RiskGatedTrade, apply_risk_gate_to_proposed_state, risk_gate_trades
+from investment_optimiser.scenario_engine import run_scenarios
 from investment_optimiser.trade_construction import construct_trades
 
 
@@ -106,6 +107,9 @@ def build_lp_recommendation(
     trades_payload = _trades_payload(gated_trades, risk_gated)
     recommended_allocations = _recommended_allocations(executable_df, total_portfolio, policy)
     all_warnings = trade_result.warnings + translation.warnings
+    scenario_results = run_scenarios(
+        enriched_holdings_df, executable_df, policy, gilt_ranking_df, reference_date=today
+    )
 
     snapshot = _build_snapshot(
         policy=policy,
@@ -123,6 +127,7 @@ def build_lp_recommendation(
         binding_constraints=lp_result.binding_constraints,
         warnings=all_warnings,
         notes=lp_result.notes,
+        scenario_results=scenario_results,
     )
 
     return LPRecommendationResult(
@@ -260,6 +265,7 @@ def _build_snapshot(
     binding_constraints: list[str],
     warnings: list[str],
     notes: list[str],
+    scenario_results: list[dict] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": ALLOCATION_RUN_SCHEMA_VERSION,
@@ -283,7 +289,7 @@ def _build_snapshot(
             "trades": trades_payload,
             "executable_portfolio": executable_records,
             "recommended_allocations": recommended_allocations,
-            "scenario_results": [],
+            "scenario_results": scenario_results or [],
         },
         "diagnostics": {
             "binding_constraints": binding_constraints,
