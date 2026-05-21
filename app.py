@@ -55,6 +55,7 @@ from investment_optimiser.blocked_trade_display import (
     RISK_OUTCOME_LABELS,
     RISK_PASS_OUTCOMES,
 )
+from investment_optimiser.narrative_explanation import build_narrative_components
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -1711,6 +1712,120 @@ def _render_recommendation_change_summary(database_url: str) -> None:
         st.caption(f"Current run: {current_date}  |  Prior run: {prior_date}")
 
 
+def _render_narrative_explanation_panel(database_url: str) -> None:
+    connection = st.connection("db", type="sql", url=database_url)
+    recent = connection.query(
+        """
+        SELECT id, created_at, snapshot_json
+        FROM allocation_runs
+        WHERE solver_status = 'optimal'
+        ORDER BY id DESC
+        LIMIT 2
+        """,
+        ttl=0,
+    )
+
+    if recent.empty:
+        return
+
+    current_snap = json.loads(recent.iloc[0]["snapshot_json"])
+    prior_snap = json.loads(recent.iloc[1]["snapshot_json"]) if len(recent) >= 2 else None
+
+    c = build_narrative_components(current_snap, prior_snapshot=prior_snap)
+
+    st.subheader("Why this recommendation?")
+
+    with st.container(border=True):
+        _render_narrative_overview(c)
+        _render_narrative_allocation_shifts(c)
+        _render_narrative_blocked_trades(c)
+        _render_narrative_binding_constraints(c)
+
+
+def _render_narrative_overview(c: dict) -> None:
+    n_approved = len(c["approved_trades"])
+    n_friction = len(c["friction_blocked"])
+    n_risk = len(c["risk_blocked"])
+    n_blocked = n_friction + n_risk
+
+    if c["headline"] is not None:
+        h = c["headline"]
+        col1, col2, col3 = st.columns(3)
+        col1.metric(
+            "Portfolio value",
+            f"£{h['current_value_gbp']:,.0f}",
+            f"£{h['value_delta_gbp']:+,.0f}",
+        )
+        col2.metric("Approved trades", n_approved)
+        col3.metric("Blocked trades", n_blocked)
+        if h["regime_changed"]:
+            st.info(f"Regime changed: **{h['prior_regime']}** → **{h['current_regime']}**")
+        if h["scenario_set_changed"]:
+            st.info(
+                f"Scenario set changed: **{h['prior_scenario_set']}** → **{h['current_scenario_set']}**"
+            )
+    else:
+        col1, col2 = st.columns(2)
+        col1.metric("Approved trades", n_approved)
+        col2.metric("Blocked trades", n_blocked)
+
+
+def _render_narrative_allocation_shifts(c: dict) -> None:
+    deltas = c["allocation_deltas"]
+    if deltas is None or deltas.empty:
+        return
+
+    by_abs = deltas.sort_values("delta_pct", key=lambda s: s.abs(), ascending=False)
+    increases = by_abs[by_abs["delta_pct"] > 0].head(3)
+    decreases = by_abs[by_abs["delta_pct"] < 0].head(3)
+
+    if increases.empty and decreases.empty:
+        return
+
+    st.markdown("**Allocation shifts since prior run**")
+    lines = []
+    for _, row in increases.iterrows():
+        lines.append(f"- **{row['label']}** +{row['delta_pct']:.1f}%")
+    for _, row in decreases.iterrows():
+        lines.append(f"- **{row['label']}** {row['delta_pct']:.1f}%")
+    st.markdown("\n".join(lines))
+
+
+def _render_narrative_blocked_trades(c: dict) -> None:
+    if not c["friction_blocked"] and not c["risk_blocked"]:
+        return
+
+    if c["friction_blocked"]:
+        st.markdown("**Friction-blocked** (dealing cost exceeds yield gain)")
+        lines = []
+        for t in c["friction_blocked"]:
+            note = t.get("friction_note") or "cost exceeds gain"
+            lines.append(f"- **{t['symbol']}** £{t['delta_value_gbp']:+,.0f} — {note}")
+        st.markdown("\n".join(lines))
+
+    if c["risk_blocked"]:
+        st.markdown("**Risk-blocked** (policy constraint)")
+        lines = []
+        for t in c["risk_blocked"]:
+            reason = t.get("risk_note") or RISK_OUTCOME_LABELS.get(t["risk_outcome"], t["risk_outcome"])
+            lines.append(f"- **{t['symbol']}** £{t['delta_value_gbp']:+,.0f} — {reason}")
+        st.markdown("\n".join(lines))
+
+
+def _render_narrative_binding_constraints(c: dict) -> None:
+    if not c["binding_constraints"]:
+        return
+
+    st.markdown("**Active constraints**")
+    lines = []
+    for constraint in c["binding_constraints"]:
+        sp = constraint.get("shadow_price")
+        sp_str = f" (shadow price: {sp:.4f})" if sp is not None else ""
+        marker = " _(near binding)_" if constraint["status"] == "near_binding" else ""
+        lines.append(f"- {constraint['short']}{sp_str}{marker}")
+    st.markdown("\n".join(lines))
+
+
 def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
     render_baseline_section(state, database_url)
     st.divider()
@@ -1719,6 +1834,8 @@ def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
     _render_scenario_comparison(database_url)
     st.divider()
     _render_recommendation_change_summary(database_url)
+    st.divider()
+    _render_narrative_explanation_panel(database_url)
     st.divider()
     _render_cash_recommendation(state, database_url)
     st.divider()
