@@ -46,6 +46,10 @@ from investment_optimiser.scenario_comparison import (
     build_scenario_comparison_df,
     compute_scenario_totals,
 )
+from investment_optimiser.recommendation_change_summary import (
+    build_allocation_change_df,
+    build_headline_metrics,
+)
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -1590,12 +1594,88 @@ def _render_scenario_comparison(database_url: str) -> None:
             )
 
 
+def _render_recommendation_change_summary(database_url: str) -> None:
+    st.subheader("Change summary")
+
+    connection = st.connection("db", type="sql", url=database_url)
+    recent = connection.query(
+        """
+        SELECT id, created_at, snapshot_json
+        FROM allocation_runs
+        WHERE solver_status = 'optimal'
+        ORDER BY id DESC
+        LIMIT 2
+        """,
+        ttl=0,
+    )
+
+    if recent.empty:
+        st.info("No recommendation runs yet.")
+        return
+
+    current_snap = json.loads(recent.iloc[0]["snapshot_json"])
+    prior_snap = json.loads(recent.iloc[1]["snapshot_json"]) if len(recent) >= 2 else None
+
+    if prior_snap is None:
+        st.info("This is the first recommendation run — no prior run to compare against.")
+        return
+
+    metrics = build_headline_metrics(prior_snap, current_snap)
+
+    if metrics["regime_changed"]:
+        st.info(
+            f"Regime changed: **{metrics['prior_regime']}** → **{metrics['current_regime']}**"
+        )
+    if metrics["scenario_set_changed"]:
+        st.info(
+            f"Scenario set changed: **{metrics['prior_scenario_set']}** → **{metrics['current_scenario_set']}**"
+        )
+
+    prior_date = recent.iloc[1]["created_at"][:10]
+    current_date = recent.iloc[0]["created_at"][:10]
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric(
+        "Portfolio value",
+        f"£{metrics['current_value_gbp']:,.0f}",
+        f"£{metrics['value_delta_gbp']:+,.0f}",
+    )
+    col2.metric(
+        "Trades recommended",
+        metrics["current_trade_count"],
+        metrics["trade_count_delta"],
+    )
+    col3.metric("Prior run date", prior_date, help="Date of the run being compared against")
+
+    change_df = build_allocation_change_df(prior_snap, current_snap)
+    if change_df.empty:
+        st.caption("No allocation shifts above threshold since the prior run.")
+    else:
+        st.dataframe(
+            change_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "bucket_id": st.column_config.TextColumn("Bucket ID"),
+                "label": st.column_config.TextColumn("Bucket"),
+                "prior_pct": st.column_config.NumberColumn("Prior %", format="%.1f%%"),
+                "current_pct": st.column_config.NumberColumn("Current %", format="%.1f%%"),
+                "delta_pct": st.column_config.NumberColumn("Change", format="%+.1f%%"),
+            },
+        )
+
+    with st.expander("Run details"):
+        st.caption(f"Current run: {current_date}  |  Prior run: {prior_date}")
+
+
 def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
     render_baseline_section(state, database_url)
     st.divider()
     _render_lp_recommendation(state, database_url)
     st.divider()
     _render_scenario_comparison(database_url)
+    st.divider()
+    _render_recommendation_change_summary(database_url)
     st.divider()
     _render_cash_recommendation(state, database_url)
     st.divider()
