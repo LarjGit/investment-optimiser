@@ -40,6 +40,7 @@ from investment_optimiser.strategic_baseline import (
 from investment_optimiser.allocation_view import build_allocation_table, enrich_with_buckets, style_allocation_table
 from investment_optimiser.allocation_runs import insert_allocation_run
 from investment_optimiser.cash_allocator import build_cash_run_record, compute_cash_deployment
+from investment_optimiser.lp_recommendation import build_lp_recommendation
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -1395,8 +1396,120 @@ def _render_cash_recommendation(state: dict[str, Any], database_url: str) -> Non
             st.dataframe(history, hide_index=True, use_container_width=True)
 
 
+def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
+    st.subheader("Portfolio recommendation")
+
+    holdings = state["holdings"]
+    current_baseline = state["current_baseline"]
+    snapshot_date = state["summary"].get("latest_snapshot_date") or ""
+
+    if holdings.empty:
+        st.info("No portfolio snapshot loaded. Import a portfolio CSV first.")
+        return
+    if current_baseline is None:
+        st.info("No strategic baseline set. Add one in the baseline section above.")
+        return
+    if state["gilt_ranking"].empty:
+        st.info("No gilt data available. Run a market data refresh first.")
+        return
+
+    policy = load_policy_pack()
+
+    if st.button("Generate recommendation", type="primary", key="lp_recommend_btn"):
+        with st.spinner("Running portfolio optimisation…", show_time=True):
+            enriched = enrich_with_buckets(holdings)
+            result = build_lp_recommendation(
+                enriched_holdings_df=enriched,
+                baseline_weights=current_baseline.weights,
+                baseline_label=current_baseline.label,
+                policy=policy,
+                snapshot_date=snapshot_date,
+                gilt_ranking_df=state["gilt_ranking"],
+            )
+        if result.solver_status != "optimal":
+            st.error(
+                f"LP solver returned '{result.solver_status}' — no executable recommendation. "
+                + "; ".join(result.warnings)
+            )
+        else:
+            db_path = sqlite_path_from_url(database_url)
+            write_conn = sqlite3.connect(str(db_path))
+            try:
+                insert_allocation_run(write_conn, result.record)
+                write_conn.commit()
+            finally:
+                write_conn.close()
+            st.cache_data.clear()
+            st.success("Recommendation generated and saved.")
+            st.rerun()
+
+    connection = st.connection("db", type="sql", url=database_url)
+    recent = connection.query(
+        """
+        SELECT id, created_at, solver_status, baseline_version, snapshot_json
+        FROM allocation_runs
+        WHERE solver_status = 'optimal'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        ttl=0,
+    )
+
+    if recent.empty:
+        st.caption("No recommendation runs yet. Click the button above to generate one.")
+        return
+
+    latest = recent.iloc[0]
+    snapshot = json.loads(latest["snapshot_json"])
+    outputs = snapshot.get("outputs", {})
+    trades = outputs.get("trades", [])
+    recommended = outputs.get("recommended_allocations", [])
+    diagnostics = snapshot.get("diagnostics", {})
+
+    st.caption(
+        f"Latest run: {latest['created_at']}  |  Baseline: {latest['baseline_version']}"
+    )
+
+    if recommended:
+        st.markdown("**Executable portfolio (post-gate)**")
+        rec_df = pd.DataFrame(recommended)[["label", "proposed_value_gbp", "proposed_pct"]]
+        rec_df.columns = ["Bucket", "Value (£)", "Weight (%)"]
+        rec_df["Value (£)"] = rec_df["Value (£)"].map(lambda v: f"£{v:,.0f}")
+        rec_df["Weight (%)"] = rec_df["Weight (%)"].map(lambda v: f"{v:.1f}%")
+        st.dataframe(rec_df, hide_index=True, use_container_width=True)
+
+    if trades:
+        blocked = [t for t in trades if t["friction_outcome"] == "red" or t["risk_outcome"] not in ("pass", "not_gated", "not_evaluated")]
+        passing = [t for t in trades if t["friction_outcome"] != "red" and t["risk_outcome"] in ("pass", "not_gated", "not_evaluated") and t["delta_value_gbp"] != 0]
+
+        if passing:
+            st.markdown("**Approved trades**")
+            pass_df = pd.DataFrame(passing)[["symbol", "bucket_id", "delta_value_gbp", "friction_outcome", "friction_note"]]
+            pass_df.columns = ["Symbol", "Bucket", "Delta (£)", "Friction", "Note"]
+            pass_df["Delta (£)"] = pass_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
+            st.dataframe(pass_df, hide_index=True, use_container_width=True)
+
+        if blocked:
+            st.markdown("**Blocked trades**")
+            block_df = pd.DataFrame(blocked)[["symbol", "bucket_id", "delta_value_gbp", "friction_outcome", "friction_note", "risk_outcome", "risk_note"]]
+            block_df.columns = ["Symbol", "Bucket", "Delta (£)", "Friction", "Friction reason", "Risk gate", "Risk reason"]
+            block_df["Delta (£)"] = block_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
+            st.dataframe(block_df, hide_index=True, use_container_width=True)
+
+    binding = diagnostics.get("binding_constraints", [])
+    warnings = diagnostics.get("warnings", [])
+    if binding or warnings:
+        with st.expander("Constraints and warnings"):
+            if binding:
+                st.caption("Binding constraints: " + ", ".join(binding))
+            for w in warnings:
+                st.caption(f"⚠ {w}")
+
+
 def render_scenarios_tab(state: dict[str, Any], database_url: str) -> None:
     render_baseline_section(state, database_url)
+    st.divider()
+    _render_lp_recommendation(state, database_url)
     st.divider()
     _render_cash_recommendation(state, database_url)
     st.divider()
