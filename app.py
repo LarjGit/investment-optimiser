@@ -50,6 +50,11 @@ from investment_optimiser.recommendation_change_summary import (
     build_allocation_change_df,
     build_headline_metrics,
 )
+from investment_optimiser.blocked_trade_display import (
+    categorise_blocked_trades,
+    RISK_OUTCOME_LABELS,
+    RISK_PASS_OUTCOMES,
+)
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
 from investment_optimiser.yfinance_equities import (
@@ -1488,8 +1493,15 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
         st.dataframe(rec_df, hide_index=True, use_container_width=True)
 
     if trades:
-        blocked = [t for t in trades if t["friction_outcome"] == "red" or t["risk_outcome"] not in ("pass", "not_gated", "not_evaluated")]
-        passing = [t for t in trades if t["friction_outcome"] != "red" and t["risk_outcome"] in ("pass", "not_gated", "not_evaluated") and t["delta_value_gbp"] != 0]
+        friction_blocked, risk_blocked = categorise_blocked_trades(trades)
+        friction_blocked = [t for t in friction_blocked if abs(t["delta_value_gbp"]) >= 1]
+        risk_blocked = [t for t in risk_blocked if abs(t["delta_value_gbp"]) >= 1]
+        passing = [
+            t for t in trades
+            if t["friction_outcome"] != "red"
+            and t["risk_outcome"] in RISK_PASS_OUTCOMES
+            and abs(t["delta_value_gbp"]) >= 1
+        ]
 
         if passing:
             st.markdown("**Approved trades**")
@@ -1498,12 +1510,25 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
             pass_df["Delta (£)"] = pass_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
             st.dataframe(pass_df, hide_index=True, use_container_width=True)
 
-        if blocked:
-            st.markdown("**Blocked trades**")
-            block_df = pd.DataFrame(blocked)[["symbol", "bucket_id", "delta_value_gbp", "friction_outcome", "friction_note", "risk_outcome", "risk_note"]]
-            block_df.columns = ["Symbol", "Bucket", "Delta (£)", "Friction", "Friction reason", "Risk gate", "Risk reason"]
-            block_df["Delta (£)"] = block_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
-            st.dataframe(block_df, hide_index=True, use_container_width=True)
+        if not friction_blocked and not risk_blocked:
+            st.success("No blocked trades — all recommendations cleared friction and risk checks.")
+        else:
+            if friction_blocked:
+                st.markdown(":red-badge[Friction block] Trade stopped because transaction cost exceeds yield benefit")
+                fb_df = pd.DataFrame(friction_blocked)[["symbol", "delta_value_gbp", "friction_note"]]
+                fb_df.columns = ["Trade", "Delta (£)", "Why blocked"]
+                fb_df["Delta (£)"] = fb_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
+                with st.expander(f"Friction-blocked trades ({len(friction_blocked)})", expanded=True):
+                    st.table(fb_df)
+
+            if risk_blocked:
+                st.markdown(":orange-badge[Risk block] Trade stopped by portfolio risk constraints")
+                rb_df = pd.DataFrame(risk_blocked)[["symbol", "delta_value_gbp", "risk_outcome", "risk_note"]]
+                rb_df["risk_outcome"] = rb_df["risk_outcome"].map(lambda o: RISK_OUTCOME_LABELS.get(o, o))
+                rb_df.columns = ["Trade", "Delta (£)", "Constraint", "Why blocked"]
+                rb_df["Delta (£)"] = rb_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
+                with st.expander(f"Risk-blocked trades ({len(risk_blocked)})", expanded=True):
+                    st.table(rb_df)
 
     binding = diagnostics.get("binding_constraints", [])
     warnings = diagnostics.get("warnings", [])

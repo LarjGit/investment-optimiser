@@ -68,6 +68,8 @@ def _break_even_months(
     if yield_improvement_bps is None or yield_improvement_bps <= 0.0:
         return None
     annual_gain = (yield_improvement_bps / 10_000.0) * position_size_gbp
+    if annual_gain < 1e-6:
+        return None
     return (total_friction_gbp / annual_gain) * 12.0
 
 
