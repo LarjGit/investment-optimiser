@@ -78,12 +78,12 @@ def _fetch_yield_curve_data(
         """
         SELECT
             cache_date,
-            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct
+            MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) AS two_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) AS ten_year_pct
         FROM yield_curve_cache
         WHERE cache_date = (
-            SELECT MAX(cache_date) FROM yield_curve_cache WHERE curve_key = 'boe_10y'
+            SELECT MAX(cache_date) FROM yield_curve_cache WHERE curve_key = 'lse_derived_2y'
         )
         GROUP BY cache_date
         """
@@ -93,25 +93,25 @@ def _fetch_yield_curve_data(
     if latest_row and all(v is not None for v in [latest_row[1], latest_row[2], latest_row[3]]):
         yield_curve = {
             "cache_date": latest_row[0],
-            "five_year_pct": float(latest_row[1]),
-            "ten_year_pct": float(latest_row[2]),
-            "twenty_year_pct": float(latest_row[3]),
+            "two_year_pct": float(latest_row[1]),
+            "five_year_pct": float(latest_row[2]),
+            "ten_year_pct": float(latest_row[3]),
         }
 
     history_rows = conn.execute(
         """
         SELECT
             cache_date,
-            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct
+            MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) AS two_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) AS ten_year_pct
         FROM yield_curve_cache
-        WHERE curve_key IN ('boe_5y', 'boe_10y', 'boe_20y')
+        WHERE curve_key IN ('lse_derived_2y', 'lse_derived_5y', 'lse_derived_10y')
           AND cache_date >= date(?, '-40 days')
         GROUP BY cache_date
-        HAVING MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) IS NOT NULL
-           AND MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) IS NOT NULL
-           AND MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) IS NOT NULL
+        HAVING MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) IS NOT NULL
         ORDER BY cache_date DESC
         """,
         (reading_date,),
@@ -185,18 +185,18 @@ def run_signal_persistence(
     yield_curve, yield_curve_history = _fetch_yield_curve_data(conn, reading_date)
 
     yc_signal = evaluate_yield_curve_shape_signal(
+        two_y=yield_curve.get("two_year_pct") if yield_curve else None,
         five_y=yield_curve.get("five_year_pct") if yield_curve else None,
         ten_y=yield_curve.get("ten_year_pct") if yield_curve else None,
-        twenty_y=yield_curve.get("twenty_year_pct") if yield_curve else None,
         cache_date=yield_curve.get("cache_date") if yield_curve else None,
         history=yield_curve_history,
     )
 
     if yc_signal.spread_bps is not None:
         yc_metrics: list[tuple[str, float, str]] = [
+            ("two_year_pct", yc_signal.two_year_pct, "pct"),
             ("five_year_pct", yc_signal.five_year_pct, "pct"),
             ("ten_year_pct", yc_signal.ten_year_pct, "pct"),
-            ("twenty_year_pct", yc_signal.twenty_year_pct, "pct"),
             ("spread_bps", yc_signal.spread_bps, "bps"),
         ]
         if yc_signal.consecutive_days is not None:

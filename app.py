@@ -313,13 +313,13 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
     yield_curve_rows = connection.query(
         """
         SELECT
-            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) AS two_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) AS ten_year_pct,
             cache_date
         FROM yield_curve_cache
         WHERE cache_date = (
-            SELECT MAX(cache_date) FROM yield_curve_cache WHERE curve_key = 'boe_10y'
+            SELECT MAX(cache_date) FROM yield_curve_cache WHERE curve_key = 'lse_derived_2y'
         )
         GROUP BY cache_date
         """,
@@ -329,16 +329,16 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """
         SELECT
             cache_date,
-            MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) AS five_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) AS ten_year_pct,
-            MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) AS twenty_year_pct
+            MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) AS two_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) AS five_year_pct,
+            MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) AS ten_year_pct
         FROM yield_curve_cache
-        WHERE curve_key IN ('boe_5y', 'boe_10y', 'boe_20y')
+        WHERE curve_key IN ('lse_derived_2y', 'lse_derived_5y', 'lse_derived_10y')
           AND cache_date >= date('now', '-40 days')
         GROUP BY cache_date
-        HAVING MAX(CASE WHEN curve_key = 'boe_5y'  THEN rate_pct END) IS NOT NULL
-           AND MAX(CASE WHEN curve_key = 'boe_10y' THEN rate_pct END) IS NOT NULL
-           AND MAX(CASE WHEN curve_key = 'boe_20y' THEN rate_pct END) IS NOT NULL
+        HAVING MAX(CASE WHEN curve_key = 'lse_derived_2y'  THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'lse_derived_5y'  THEN rate_pct END) IS NOT NULL
+           AND MAX(CASE WHEN curve_key = 'lse_derived_10y' THEN rate_pct END) IS NOT NULL
         ORDER BY cache_date DESC
         """,
         ttl=60,
@@ -347,21 +347,21 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
     yield_curve: dict | None = None
     if not yield_curve_rows.empty:
         row = yield_curve_rows.iloc[0]
-        if pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]) and pd.notna(row["twenty_year_pct"]):
+        if pd.notna(row["two_year_pct"]) and pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]):
             yield_curve = {
                 "cache_date": row["cache_date"],
+                "two_year_pct": float(row["two_year_pct"]),
                 "five_year_pct": float(row["five_year_pct"]),
                 "ten_year_pct": float(row["ten_year_pct"]),
-                "twenty_year_pct": float(row["twenty_year_pct"]),
             }
 
     yield_curve_history: list[tuple[str, str]] = []
     for _, row in yield_curve_history_rows.iterrows():
-        if pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]) and pd.notna(row["twenty_year_pct"]):
+        if pd.notna(row["two_year_pct"]) and pd.notna(row["five_year_pct"]) and pd.notna(row["ten_year_pct"]):
             curve_state = classify_curve_state(
+                float(row["two_year_pct"]),
                 float(row["five_year_pct"]),
                 float(row["ten_year_pct"]),
-                float(row["twenty_year_pct"]),
             )
             yield_curve_history.append((row["cache_date"], curve_state))
 
@@ -1056,15 +1056,15 @@ def render_yield_curve_shape_signal_card(
 ) -> None:
     st.subheader("Yield Curve Shape Signal")
 
+    two_y: float | None = yield_curve.get("two_year_pct") if yield_curve else None
     five_y: float | None = yield_curve.get("five_year_pct") if yield_curve else None
     ten_y: float | None = yield_curve.get("ten_year_pct") if yield_curve else None
-    twenty_y: float | None = yield_curve.get("twenty_year_pct") if yield_curve else None
     cache_date: str | None = yield_curve.get("cache_date") if yield_curve else None
 
     signal = evaluate_yield_curve_shape_signal(
+        two_y=two_y,
         five_y=five_y,
         ten_y=ten_y,
-        twenty_y=twenty_y,
         cache_date=cache_date,
         history=yield_curve_history,
     )
@@ -1072,17 +1072,17 @@ def render_yield_curve_shape_signal_card(
     col1, col2, col3, col4 = st.columns(4)
 
     if signal.state == "unavailable":
-        col1.metric("5y yield", "—")
-        col2.metric("10y yield", "—")
-        col3.metric("20y yield", "—")
-        col4.metric("10y−5y spread", "—")
+        col1.metric("2y yield", "—")
+        col2.metric("5y yield", "—")
+        col3.metric("10y yield", "—")
+        col4.metric("10y−2y spread", "—")
         st.error(signal.explanation)
         return
 
-    col1.metric("5y yield", f"{signal.five_year_pct:.2f}%")
-    col2.metric("10y yield", f"{signal.ten_year_pct:.2f}%")
-    col3.metric("20y yield", f"{signal.twenty_year_pct:.2f}%")
-    col4.metric("10y−5y spread", f"{signal.spread_bps:+.0f}bps")
+    col1.metric("2y yield", f"{signal.two_year_pct:.2f}%")
+    col2.metric("5y yield", f"{signal.five_year_pct:.2f}%")
+    col3.metric("10y yield", f"{signal.ten_year_pct:.2f}%")
+    col4.metric("10y−2y spread", f"{signal.spread_bps:+.0f}bps")
 
     curve_label = signal.curve_state.capitalize() if signal.curve_state else "—"
     days_str = f"{signal.consecutive_days} consecutive UK business days" if signal.consecutive_days is not None else "—"
@@ -1095,11 +1095,11 @@ def render_yield_curve_shape_signal_card(
 
     with st.expander("About this signal"):
         st.write(
-            "Uses the 10y−5y nominal par yield spread from Bank of England IADB data "
-            "(series IUDMNPY and IUDSNPY). The design target is the 10y−2y spread, but "
-            "the BoE IADB does not publish a 2-year series. "
-            "Classification: Normal (spread >+10bps), Inverted (<−10bps), "
-            "Flat (within ±10bps), Humped (10y above both 5y and 20y by >10bps). "
+            "Uses the 10y−2y nominal yield spread derived from LSE gilt prices. "
+            "2y, 5y, and 10y benchmark yields are each taken from the nearest-maturity "
+            "conventional gilt in the daily LSE price feed. "
+            "Classification: Normal (10y−2y spread >+10bps), Inverted (<−10bps), "
+            "Flat (within ±10bps), Humped (5y above both 2y and 10y by >10bps). "
             "A warning fires only after the non-normal shape has held for "
             "5 consecutive UK business days."
         )

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import sqlite3
+
+import pytest
 
 from investment_optimiser.db import initialize_database
 from investment_optimiser.gilt_analytics import compute_gry, gilt_analytics_handler
@@ -180,3 +182,65 @@ def test_gilt_analytics_handler_skips_already_solved_rows(tmp_path: Path) -> Non
     assert rows["GB0002404191"] == (0.045, 4.5)
     assert rows["GB00B84Z3S63"][0] is not None
     assert rows["GB00B84Z3S63"][1] is not None
+
+
+def test_gilt_analytics_handler_derives_lse_benchmark_yields(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+    today = date.today()
+
+    gilts = [
+        ("GB0000000001", (today + timedelta(days=365)).isoformat(),  4.25, 0.042),
+        ("GB0000000002", (today + timedelta(days=730)).isoformat(),  4.00, 0.040),
+        ("GB0000000003", (today + timedelta(days=1825)).isoformat(), 3.75, 0.038),
+        ("GB0000000004", (today + timedelta(days=10950)).isoformat(), 1.50, 0.045),
+    ]
+
+    with sqlite3.connect(db_path) as connection:
+        for isin, maturity, coupon, gry in gilts:
+            _seed_reference_row(connection, isin=isin, coupon_pct=coupon, maturity_date=maturity)
+            _seed_price_row(
+                connection,
+                isin=isin,
+                clean_price=100.0,
+                coupon_pct=coupon,
+                maturity_date=maturity,
+                gry_pct=gry,
+            )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(connection)
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in connection.execute(
+                "SELECT curve_key, rate_pct, series_code FROM yield_curve_cache"
+            ).fetchall()
+        }
+
+    assert "lse_derived_1y" in rows
+    assert "lse_derived_2y" in rows
+    assert "lse_derived_30y" in rows
+    assert rows["lse_derived_1y"][1] == "LSE_DERIVED"
+    assert rows["lse_derived_2y"][1] == "LSE_DERIVED"
+    assert rows["lse_derived_30y"][1] == "LSE_DERIVED"
+    # nearest gilt to 1y has gry=0.042, nearest to 2y has gry=0.040, nearest to 30y has gry=0.045
+    assert rows["lse_derived_1y"][0] == pytest.approx(0.042)
+    assert rows["lse_derived_2y"][0] == pytest.approx(0.040)
+    assert rows["lse_derived_30y"][0] == pytest.approx(0.045)
+
+
+def test_gilt_analytics_handler_skips_benchmark_when_no_gry_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(connection)
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM yield_curve_cache").fetchone()[0]
+    assert count == 0

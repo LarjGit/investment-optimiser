@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 import sqlite3
 
 import numpy as np
@@ -119,7 +119,7 @@ def compute_gry(
 
     y = (1.0 / v - 1.0) * f
 
-    times = np.arange(r / s, r / s + n + 1)
+    times = r / s + np.arange(n + 1)
     cash_flows = np.full(n + 1, d2)
     cash_flows[0] = d1
     cash_flows[-1] += 100.0
@@ -176,6 +176,59 @@ def clean_price_from_gry(
     return clean_price if clean_price > 0 else None
 
 
+_BENCHMARK_MATURITIES: dict[str, float] = {
+    "lse_derived_1y": 1.0,
+    "lse_derived_2y": 2.0,
+    "lse_derived_5y": 5.0,
+    "lse_derived_10y": 10.0,
+    "lse_derived_30y": 30.0,
+}
+
+
+def _derive_benchmark_yields(
+    connection: sqlite3.Connection, cache_date: str, fetched_at: str
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT isin, gry_pct, maturity_date
+        FROM gilt_price_cache
+        WHERE cache_date = ? AND gry_pct IS NOT NULL
+        ORDER BY maturity_date ASC
+        """,
+        (cache_date,),
+    ).fetchall()
+
+    if not rows:
+        return
+
+    today = date.fromisoformat(cache_date)
+    benchmark_rows = []
+    for curve_key, target_years in _BENCHMARK_MATURITIES.items():
+        best = min(
+            rows,
+            key=lambda r, ty=target_years: abs(
+                (date.fromisoformat(r[2]) - today).days / 365.25 - ty
+            ),
+        )
+        benchmark_rows.append((
+            cache_date,
+            curve_key,
+            target_years,
+            float(best[1]),
+            "LSE_DERIVED",
+            fetched_at,
+        ))
+
+    connection.executemany(
+        """
+        INSERT OR REPLACE INTO yield_curve_cache
+            (cache_date, curve_key, maturity_years, rate_pct, series_code, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        benchmark_rows,
+    )
+
+
 def gilt_analytics_handler(connection: sqlite3.Connection) -> list[str]:
     cache_date = date.today().isoformat()
     settlement = settlement_date_for(date.today())
@@ -211,4 +264,7 @@ def gilt_analytics_handler(connection: sqlite3.Connection) -> list[str]:
             """,
             updates,
         )
+
+    fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _derive_benchmark_yields(connection, cache_date, fetched_at)
     return warnings

@@ -195,9 +195,9 @@ def test_write_signal_readings_upsert(tmp_path: Path) -> None:
 
 def _seed_market_data(conn: sqlite3.Connection, reading_date: str) -> None:
     for curve_key, maturity, rate in [
-        ("boe_5y", 5.0, 4.0),
-        ("boe_10y", 10.0, 4.5),
-        ("boe_20y", 20.0, 4.8),
+        ("lse_derived_2y", 2.0, 4.0),
+        ("lse_derived_5y", 5.0, 4.2),
+        ("lse_derived_10y", 10.0, 4.5),
     ]:
         conn.execute(
             """

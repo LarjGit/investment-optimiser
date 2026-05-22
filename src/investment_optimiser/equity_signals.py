@@ -28,9 +28,9 @@ class YieldCurveSignal:
     curve_state: str | None
     consecutive_days: int | None
     spread_bps: float | None
+    two_year_pct: float | None
     five_year_pct: float | None
     ten_year_pct: float | None
-    twenty_year_pct: float | None
     cache_date: str | None
     explanation: str
 
@@ -273,18 +273,19 @@ def evaluate_erp_signal(
 
 
 def classify_curve_state(
+    two_y: float,
     five_y: float,
     ten_y: float,
-    twenty_y: float,
     flat_threshold_bps: float = CURVE_FLAT_THRESHOLD_BPS,
 ) -> str:
-    five_to_ten_bps = (ten_y - five_y) * 100
-    ten_to_twenty_bps = (ten_y - twenty_y) * 100
-    if five_to_ten_bps > flat_threshold_bps and ten_to_twenty_bps > flat_threshold_bps:
+    two_to_ten_bps = (ten_y - two_y) * 100
+    five_above_two_bps = (five_y - two_y) * 100
+    five_above_ten_bps = (five_y - ten_y) * 100
+    if five_above_two_bps > flat_threshold_bps and five_above_ten_bps > flat_threshold_bps:
         return "humped"
-    if five_to_ten_bps > flat_threshold_bps:
+    if two_to_ten_bps > flat_threshold_bps:
         return "normal"
-    if five_to_ten_bps < -flat_threshold_bps:
+    if two_to_ten_bps < -flat_threshold_bps:
         return "inverted"
     return "flat"
 
@@ -315,29 +316,29 @@ def count_consecutive_bdays_with_state(
 
 
 def evaluate_yield_curve_shape_signal(
+    two_y: float | None,
     five_y: float | None,
     ten_y: float | None,
-    twenty_y: float | None,
     cache_date: str | None,
     history: list[tuple[str, str]],
     flat_threshold_bps: float = CURVE_FLAT_THRESHOLD_BPS,
     persistence_days: int = CURVE_PERSISTENCE_DAYS,
 ) -> YieldCurveSignal:
-    if five_y is None or ten_y is None or twenty_y is None or cache_date is None:
+    if two_y is None or five_y is None or ten_y is None or cache_date is None:
         return YieldCurveSignal(
             state="unavailable",
             curve_state=None,
             consecutive_days=None,
             spread_bps=None,
+            two_year_pct=None,
             five_year_pct=None,
             ten_year_pct=None,
-            twenty_year_pct=None,
             cache_date=cache_date,
             explanation="Yield curve data is unavailable.",
         )
 
-    spread_bps = round((ten_y - five_y) * 100, 2)
-    curve_state = classify_curve_state(five_y, ten_y, twenty_y, flat_threshold_bps)
+    spread_bps = round((ten_y - two_y) * 100, 2)
+    curve_state = classify_curve_state(two_y, five_y, ten_y, flat_threshold_bps)
     consecutive_days = count_consecutive_bdays_with_state(history, curve_state, _UK_HOLIDAYS)
     label = curve_state.capitalize()
 
@@ -347,21 +348,21 @@ def evaluate_yield_curve_shape_signal(
             curve_state=curve_state,
             consecutive_days=consecutive_days,
             spread_bps=spread_bps,
+            two_year_pct=round(two_y, 4),
             five_year_pct=round(five_y, 4),
             ten_year_pct=round(ten_y, 4),
-            twenty_year_pct=round(twenty_y, 4),
             cache_date=cache_date,
             explanation=(
                 f"Data is stale (last fetched {cache_date}). "
-                f"Curve was {label} with 10y−5y spread {spread_bps:+.0f}bps."
+                f"Curve was {label} with 10y−2y spread {spread_bps:+.0f}bps."
             ),
         )
 
     if curve_state != "normal" and consecutive_days >= persistence_days:
         state = "warning"
         explanation = (
-            f"Curve is {label} — 10y−5y spread {spread_bps:+.0f}bps "
-            f"({five_y:.2f}% / {ten_y:.2f}% / {twenty_y:.2f}%). "
+            f"Curve is {label} — 10y−2y spread {spread_bps:+.0f}bps "
+            f"({two_y:.2f}% / {five_y:.2f}% / {ten_y:.2f}%). "
             f"This shape has held for {consecutive_days} consecutive UK business days "
             f"(≥{persistence_days}-day persistence threshold)."
         )
@@ -369,14 +370,14 @@ def evaluate_yield_curve_shape_signal(
         state = "quiet"
         if curve_state == "normal":
             explanation = (
-                f"Curve is Normal — 10y−5y spread {spread_bps:+.0f}bps "
-                f"({five_y:.2f}% / {ten_y:.2f}% / {twenty_y:.2f}%). "
+                f"Curve is Normal — 10y−2y spread {spread_bps:+.0f}bps "
+                f"({two_y:.2f}% / {five_y:.2f}% / {ten_y:.2f}%). "
                 "No warning condition active."
             )
         else:
             explanation = (
-                f"Curve is {label} — 10y−5y spread {spread_bps:+.0f}bps "
-                f"({five_y:.2f}% / {ten_y:.2f}% / {twenty_y:.2f}%). "
+                f"Curve is {label} — 10y−2y spread {spread_bps:+.0f}bps "
+                f"({two_y:.2f}% / {five_y:.2f}% / {ten_y:.2f}%). "
                 f"Held for {consecutive_days} of {persistence_days} required consecutive "
                 "UK business days before this triggers a warning."
             )
@@ -386,9 +387,9 @@ def evaluate_yield_curve_shape_signal(
         curve_state=curve_state,
         consecutive_days=consecutive_days,
         spread_bps=spread_bps,
+        two_year_pct=round(two_y, 4),
         five_year_pct=round(five_y, 4),
         ten_year_pct=round(ten_y, 4),
-        twenty_year_pct=round(twenty_y, 4),
         cache_date=cache_date,
         explanation=explanation,
     )

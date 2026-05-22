@@ -132,33 +132,33 @@ def test_not_stale_at_exactly_five_trading_days(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def test_classify_normal_when_spread_above_threshold() -> None:
-    # 10y=4.5%, 5y=4.0% → spread=50bps > 10bps → normal
-    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.8) == "normal"
+    # 10y−2y = 50bps > 10bps, 5y not a hump → normal
+    assert classify_curve_state(two_y=4.0, five_y=4.3, ten_y=4.5) == "normal"
 
 
 def test_classify_inverted_when_spread_below_negative_threshold() -> None:
-    # 10y=4.0%, 5y=4.5% → spread=-50bps < -10bps → inverted
-    assert classify_curve_state(five_y=4.5, ten_y=4.0, twenty_y=3.8) == "inverted"
+    # 10y−2y = −50bps < −10bps → inverted
+    assert classify_curve_state(two_y=4.5, five_y=4.2, ten_y=4.0) == "inverted"
 
 
 def test_classify_flat_when_spread_within_threshold() -> None:
-    # 10y=4.05%, 5y=4.0% → spread=5bps, |5| <= 10 → flat
-    assert classify_curve_state(five_y=4.0, ten_y=4.05, twenty_y=4.0) == "flat"
+    # 10y−2y = 5bps, |5| <= 10 → flat
+    assert classify_curve_state(two_y=4.0, five_y=4.0, ten_y=4.05) == "flat"
 
 
-def test_classify_humped_when_ten_year_is_local_peak() -> None:
-    # 5y=4.0%, 10y=4.5%, 20y=4.1% → 10y above both by >10bps → humped
-    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.1) == "humped"
+def test_classify_humped_when_five_year_is_local_peak() -> None:
+    # 5y above both 2y and 10y by >10bps → humped
+    assert classify_curve_state(two_y=4.0, five_y=4.5, ten_y=4.1) == "humped"
 
 
-def test_classify_normal_not_humped_when_twenty_year_also_high() -> None:
-    # 5y=4.0%, 10y=4.5%, 20y=4.8% → 10y not above 20y → not humped → normal
-    assert classify_curve_state(five_y=4.0, ten_y=4.5, twenty_y=4.8) == "normal"
+def test_classify_normal_not_humped_when_ten_year_also_high() -> None:
+    # 5y=4.3 above 2y=4.0 by 30bps, but 5y < 10y=4.5 → not humped → normal
+    assert classify_curve_state(two_y=4.0, five_y=4.3, ten_y=4.5) == "normal"
 
 
 def test_classify_respects_custom_threshold() -> None:
-    # spread=15bps, threshold=20bps → flat (not normal)
-    assert classify_curve_state(five_y=4.0, ten_y=4.15, twenty_y=4.2, flat_threshold_bps=20.0) == "flat"
+    # 10y−2y = 15bps, threshold=20bps → flat (not normal)
+    assert classify_curve_state(two_y=4.0, five_y=4.0, ten_y=4.15, flat_threshold_bps=20.0) == "flat"
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ def test_consecutive_skips_bank_holiday() -> None:
 
 def test_yield_curve_unavailable_when_no_data() -> None:
     result = evaluate_yield_curve_shape_signal(
-        five_y=None, ten_y=None, twenty_y=None, cache_date=None, history=[]
+        two_y=None, five_y=None, ten_y=None, cache_date=None, history=[]
     )
     assert result.state == "unavailable"
     assert result.curve_state is None
@@ -241,7 +241,7 @@ def test_yield_curve_unavailable_when_no_data() -> None:
 
 def test_yield_curve_unavailable_when_partial_data() -> None:
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.0, ten_y=None, twenty_y=4.5, cache_date="2026-05-19", history=[]
+        two_y=4.0, five_y=4.3, ten_y=None, cache_date="2026-05-19", history=[]
     )
     assert result.state == "unavailable"
 
@@ -251,7 +251,7 @@ def test_yield_curve_stale_when_old_data(monkeypatch) -> None:
         "investment_optimiser.equity_signals.trading_days_since", lambda _: 6
     )
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        two_y=4.0, five_y=4.3, ten_y=4.5,
         cache_date="2026-05-10",
         history=[("2026-05-10", "normal")],
     )
@@ -265,7 +265,7 @@ def test_yield_curve_quiet_when_normal(monkeypatch) -> None:
     )
     history = [(f"2026-05-{d:02d}", "normal") for d in range(5, 20)]
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        two_y=4.0, five_y=4.3, ten_y=4.5,
         cache_date="2026-05-19",
         history=history,
     )
@@ -285,7 +285,7 @@ def test_yield_curve_quiet_when_inverted_but_too_short(monkeypatch) -> None:
         ("2026-05-14", "normal"),    # Thu — different state
     ]
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.5, ten_y=4.0, twenty_y=3.8,
+        two_y=4.5, five_y=4.2, ten_y=4.0,
         cache_date="2026-05-19",
         history=history,
         persistence_days=5,
@@ -308,7 +308,7 @@ def test_yield_curve_warning_when_inverted_long_enough(monkeypatch) -> None:
         ("2026-05-13", "inverted"),  # Wed
     ]
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.5, ten_y=4.0, twenty_y=3.8,
+        two_y=4.5, five_y=4.2, ten_y=4.0,
         cache_date="2026-05-19",
         history=history,
         persistence_days=5,
@@ -322,9 +322,9 @@ def test_yield_curve_spread_bps_computed_correctly(monkeypatch) -> None:
     monkeypatch.setattr(
         "investment_optimiser.equity_signals.trading_days_since", lambda _: 1
     )
-    # 10y=4.5, 5y=4.0 → spread = 50bps
+    # 10y=4.5, 2y=4.0 → 10y−2y spread = 50bps
     result = evaluate_yield_curve_shape_signal(
-        five_y=4.0, ten_y=4.5, twenty_y=4.8,
+        two_y=4.0, five_y=4.3, ten_y=4.5,
         cache_date="2026-05-19",
         history=[("2026-05-19", "normal")],
     )

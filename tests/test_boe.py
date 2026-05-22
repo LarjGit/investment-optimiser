@@ -64,7 +64,6 @@ def test_boe_handler_propagates_http_error(tmp_path: Path) -> None:
 
 def test_boe_handler_skips_missing_values_without_error(tmp_path: Path) -> None:
     db_path = _setup_db(tmp_path)
-    # IUDSNPY and IUDLNPY are missing for the first date
     csv_with_gaps = (
         "DATE,IUDBEDR,IUDSNPY,IUDMNPY,IUDLNPY\n"
         "01 Jan 2025,4.75,..,4.97,..\n"

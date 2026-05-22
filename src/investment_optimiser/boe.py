@@ -6,6 +6,7 @@ import sqlite3
 import urllib.request
 from datetime import UTC, date, datetime, timedelta
 
+
 _SERIES: dict[str, tuple[str, float | None]] = {
     "IUDBEDR": ("boe_base_rate", None),
     "IUDSNPY": ("boe_5y", 5.0),
@@ -27,6 +28,12 @@ _MONTHS = {
     1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
 }
+
+_INSERT_SQL = """
+    INSERT OR REPLACE INTO yield_curve_cache
+        (cache_date, curve_key, maturity_years, rate_pct, series_code, fetched_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+"""
 
 
 def _boe_date(d: date) -> str:
@@ -73,11 +80,4 @@ def _parse_rows(text: str) -> list[tuple[str, str, float | None, float, str, str
 def boe_handler(connection: sqlite3.Connection) -> None:
     text = _fetch_csv()
     rows = _parse_rows(text)
-    connection.executemany(
-        """
-        INSERT OR REPLACE INTO yield_curve_cache
-            (cache_date, curve_key, maturity_years, rate_pct, series_code, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
+    connection.executemany(_INSERT_SQL, rows)
