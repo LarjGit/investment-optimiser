@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from investment_optimiser.db import initialize_database
-from investment_optimiser.gilt_analytics import compute_gry, gilt_analytics_handler
+from investment_optimiser.gilt_analytics import compute_gry, compute_real_gry, gilt_analytics_handler
 
 _SETTLEMENT = date(2026, 5, 20)
 
@@ -244,3 +244,116 @@ def test_gilt_analytics_handler_skips_benchmark_when_no_gry_rows(tmp_path: Path)
     with sqlite3.connect(db_path) as connection:
         count = connection.execute("SELECT COUNT(*) FROM yield_curve_cache").fetchone()[0]
     assert count == 0
+
+
+# --- compute_real_gry ---
+
+
+def test_compute_real_gry_par_il_gilt() -> None:
+    # 2% real coupon, priced at par, ~5 years to maturity
+    # real GRY should ≈ 2%; at 3% RPI nominal-equiv ≈ 5.03%
+    real_gry, nominal_equiv = compute_real_gry(
+        100.0, 2.0, date(2031, 5, 7), _SETTLEMENT, 3.0
+    )
+
+    assert real_gry is not None
+    assert nominal_equiv is not None
+    assert abs(real_gry - 0.02) < 0.002
+    assert abs(nominal_equiv - 0.0503) < 0.005
+
+
+def test_compute_real_gry_returns_none_on_impossible_price() -> None:
+    # gilt matured before settlement — future_coupons is empty, no yield can be computed
+    result = compute_real_gry(100.0, 2.0, date(2020, 5, 7), _SETTLEMENT, 3.0)
+
+    assert result == (None, None)
+
+
+def test_fisher_conversion() -> None:
+    # exact semi-annual Fisher: n = 2*((1+r/2)*(1+i/2)-1)  ← decimal, not %
+    # r=0.02, i=0.03 → n = 2*(1.01*1.015-1) = 0.0503
+    _, nominal_equiv = compute_real_gry(100.0, 2.0, date(2031, 5, 7), _SETTLEMENT, 3.0)
+
+    assert nominal_equiv is not None
+    expected = 2.0 * ((1.0 + 0.02 / 2.0) * (1.0 + 0.03 / 2.0) - 1.0)
+    assert abs(nominal_equiv - expected) < 0.0001
+
+
+# --- gilt_analytics_handler IL gilt extension ---
+
+
+def test_il_gilt_analytics_handler_fills_real_gry_when_rpi_present(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00B4RVKJ67",
+            coupon_pct=2.0,
+            maturity_date="2031-05-07",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00B4RVKJ67",
+            clean_price=100.0,
+            coupon_pct=2.0,
+            maturity_date="2031-05-07",
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        warnings = gilt_analytics_handler(connection, rpi_assumption_pct=3.0)
+        row = connection.execute(
+            "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
+            ("GB00B4RVKJ67",),
+        ).fetchone()
+
+    assert warnings == []
+    assert row[0] is not None
+    assert row[1] is not None
+
+
+def test_compute_real_gry_negative_real_yield() -> None:
+    # 2% coupon, ~1 year to maturity, priced just above its undiscounted cash-flow sum
+    # → real yield is slightly negative; requires the v>1 solver branch
+    real_gry, nominal_equiv = compute_real_gry(
+        103.0, 2.0, date(2027, 5, 7), _SETTLEMENT, 3.0
+    )
+
+    assert real_gry is not None
+    assert real_gry < 0
+    assert nominal_equiv is not None
+
+
+def test_il_gilt_analytics_handler_skips_il_gilts_when_no_rpi(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00B4RVKJ67",
+            coupon_pct=2.0,
+            maturity_date="2031-05-07",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00B4RVKJ67",
+            clean_price=100.0,
+            coupon_pct=2.0,
+            maturity_date="2031-05-07",
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(connection)
+        row = connection.execute(
+            "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
+            ("GB00B4RVKJ67",),
+        ).fetchone()
+
+    assert row[0] is None
+    assert row[1] is None

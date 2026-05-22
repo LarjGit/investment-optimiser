@@ -39,17 +39,18 @@ def _seed_price(
     maturity_date: str = "2030-06-07",
     gry_pct: float | None = None,
     modified_duration_years: float | None = None,
+    nominal_equivalent_gry_pct: float | None = None,
     cache_date: str = "2026-05-19",
 ) -> None:
     connection.execute(
         """
         INSERT INTO gilt_price_cache (
             cache_date, isin, clean_price_gbp, gry_pct, modified_duration_years,
-            coupon_pct, maturity_date, fetched_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            coupon_pct, maturity_date, fetched_at, nominal_equivalent_gry_pct
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (cache_date, isin, clean_price_gbp, gry_pct, modified_duration_years,
-         coupon_pct, maturity_date, "2026-05-19T08:00:00Z"),
+         coupon_pct, maturity_date, "2026-05-19T08:00:00Z", nominal_equivalent_gry_pct),
     )
 
 
@@ -236,3 +237,36 @@ def test_build_universe_sorted_gry_descending_nulls_last(db: sqlite3.Connection)
     assert df.iloc[0]["isin"] == "GB00BFWFPL34"
     assert df.iloc[1]["isin"] == "GB00B54HL0K3"
     assert df.iloc[2]["isin"] == "GB00B7F9SL34"
+
+
+# --- IL gilt inclusion with RPI assumption ---
+
+
+def test_fetch_gilt_ranking_includes_il_gilts_with_rpi(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_name="Conventional 4% 2031", instrument_type="Conventional", maturity_date="2031-06-07")
+    _seed_reference(db, isin="GB00B4RVKJ67", instrument_name="IL 0.125% 2031", instrument_type="Index-linked", maturity_date="2031-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0430, modified_duration_years=4.5)
+    _seed_price(db, isin="GB00B4RVKJ67", nominal_equivalent_gry_pct=0.0503)
+    db.commit()
+
+    df = fetch_gilt_ranking(db, rpi_assumption_pct=3.0)
+
+    assert len(df) == 2
+    isins = list(df["isin"])
+    assert "GB00B54HL0K3" in isins
+    assert "GB00B4RVKJ67" in isins
+
+
+def test_build_universe_includes_il_gilt_with_rpi(db: sqlite3.Connection) -> None:
+    _seed_reference(db, isin="GB00B54HL0K3", instrument_type="Conventional", maturity_date="2031-06-07")
+    _seed_reference(db, isin="GB00B4RVKJ67", instrument_type="Index-linked", maturity_date="2031-06-07")
+    _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0430, modified_duration_years=4.5, maturity_date="2031-06-07")
+    _seed_price(db, isin="GB00B4RVKJ67", nominal_equivalent_gry_pct=0.0503, maturity_date="2031-06-07")
+    db.commit()
+
+    df, warnings = build_gilt_candidate_universe(db, rpi_assumption_pct=3.0)
+
+    assert len(df) == 2
+    isins = list(df["isin"])
+    assert "GB00B54HL0K3" in isins
+    assert "GB00B4RVKJ67" in isins

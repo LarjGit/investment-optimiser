@@ -176,6 +176,78 @@ def clean_price_from_gry(
     return clean_price if clean_price > 0 else None
 
 
+def _solve_negative_real_yield(
+    clean_price_per_100: float,
+    coupon_pct: float,
+    maturity_date: date,
+    settlement_date: date,
+) -> float | None:
+    """Brentq solve for IL gilts whose real price just exceeds the undiscounted cash-flow sum.
+
+    compute_gry only searches v ∈ [0.01, 0.9999] (positive yields). For IL gilts
+    with near-zero or negative real yields, v > 1. This function searches v ∈ (1, 1.15],
+    corresponding to real yields down to roughly −27%, which is sufficient in practice.
+    """
+    prev_coupon, future_coupons = coupon_dates(maturity_date, settlement_date)
+    if not future_coupons:
+        return None
+    next_coupon = future_coupons[0]
+    xd = ex_dividend_date(next_coupon)
+    accrued = _accrued_interest(coupon_pct, prev_coupon, next_coupon, settlement_date, xd)
+    dirty_price = clean_price_per_100 + accrued
+    if dirty_price <= 0:
+        return None
+
+    c = coupon_pct
+    f = 2.0
+    d1 = 0.0 if settlement_date > xd else c / f
+    d2 = c / f
+    n = len(future_coupons) - 1
+    r = (next_coupon - settlement_date).days
+    s = (next_coupon - prev_coupon).days
+
+    if n == 0:
+        try:
+            y = f * (((d1 + 100.0) / dirty_price) ** (s / r) - 1.0)
+            return y if y < 0 else None
+        except Exception:
+            return None
+
+    def fn(v: float) -> float:
+        return (
+            v ** (r / s)
+            * (d1 + d2 * v + c * v**2 / (f * (1 - v)) * (1 - v ** (n - 1)) + 100.0 * v**n)
+            - dirty_price
+        )
+
+    try:
+        v = optimize.brentq(fn, 1.001, 1.15)
+        y = (1.0 / v - 1.0) * f
+        return y if y < 0 else None
+    except (RuntimeError, ValueError):
+        return None
+
+
+def compute_real_gry(
+    clean_price_per_100: float,
+    coupon_pct: float,
+    maturity_date: date,
+    settlement_date: date,
+    rpi_assumption_pct: float,
+) -> tuple[float, float] | tuple[None, None]:
+    """Real GRY for an IL gilt and Fisher nominal-equivalent yield (decimal, e.g. 0.05 = 5%)."""
+    real_gry, _ = compute_gry(clean_price_per_100, coupon_pct, maturity_date, settlement_date)
+    if real_gry is None:
+        real_gry = _solve_negative_real_yield(
+            clean_price_per_100, coupon_pct, maturity_date, settlement_date
+        )
+    if real_gry is None:
+        return None, None
+    # real_gry is decimal; rpi_assumption_pct is %; exact semi-annual Fisher: (1+n/2)=(1+r/2)*(1+i/2)
+    nominal_equiv = 2.0 * ((1.0 + real_gry / 2.0) * (1.0 + rpi_assumption_pct / 200.0) - 1.0)
+    return real_gry, nominal_equiv
+
+
 _BENCHMARK_MATURITIES: dict[str, float] = {
     "lse_derived_1y": 1.0,
     "lse_derived_2y": 2.0,
@@ -229,7 +301,10 @@ def _derive_benchmark_yields(
     )
 
 
-def gilt_analytics_handler(connection: sqlite3.Connection) -> list[str]:
+def gilt_analytics_handler(
+    connection: sqlite3.Connection,
+    rpi_assumption_pct: float | None = None,
+) -> list[str]:
     cache_date = date.today().isoformat()
     settlement = settlement_date_for(date.today())
     warnings: list[str] = []
@@ -264,6 +339,47 @@ def gilt_analytics_handler(connection: sqlite3.Connection) -> list[str]:
             """,
             updates,
         )
+
+    if rpi_assumption_pct:
+        il_rows = connection.execute(
+            """
+            SELECT gpc.isin, gpc.clean_price_gbp, gpc.coupon_pct, gpc.maturity_date
+            FROM gilt_price_cache gpc
+            JOIN gilt_reference gr ON gr.isin = gpc.isin
+            WHERE gpc.cache_date = ? AND gpc.nominal_equivalent_gry_pct IS NULL
+              AND gr.instrument_type = 'Index-linked'
+            """,
+            (cache_date,),
+        ).fetchall()
+
+        il_updates: list[tuple[float, float, str, str]] = []
+        for isin, clean_price, coupon_pct, maturity_date_str in il_rows:
+            maturity = date.fromisoformat(maturity_date_str)
+            years_to_maturity = (maturity - date.today()).days / 365.25
+            undiscounted_real_sum = coupon_pct * max(0.0, years_to_maturity) + 100.0
+            if clean_price > undiscounted_real_sum * 1.5:
+                warnings.append(
+                    f"{isin} IL gilt price {clean_price:.1f} is {clean_price / undiscounted_real_sum:.1f}× "
+                    "the real cash-flow sum — this appears to be a nominal (index-uplifted) price. "
+                    "Real GRY cannot be computed without the RPI index ratio."
+                )
+                continue
+            result = compute_real_gry(clean_price, coupon_pct, maturity, settlement, rpi_assumption_pct)
+            if result == (None, None):
+                warnings.append(f"{isin} real GRY solve failed: no convergence")
+                continue
+            real_gry, nominal_equiv = result
+            il_updates.append((real_gry, nominal_equiv, cache_date, isin))
+
+        if il_updates:
+            connection.executemany(
+                """
+                UPDATE gilt_price_cache
+                SET real_gry_pct = ?, nominal_equivalent_gry_pct = ?
+                WHERE cache_date = ? AND isin = ?
+                """,
+                il_updates,
+            )
 
     fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     _derive_benchmark_yields(connection, cache_date, fetched_at)

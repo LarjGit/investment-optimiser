@@ -12,6 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from investment_optimiser.boe import boe_handler
+from functools import partial
+
 from investment_optimiser.db import initialize_database, sqlite_path_from_url
 from investment_optimiser.dmo import dmo_handler
 from investment_optimiser.gilt_analytics import gilt_analytics_handler
@@ -83,6 +85,7 @@ REFRESH_FEEDBACK_KEY = "refresh_feedback"
 REFRESH_WARNING_MESSAGES_KEY = "refresh_warning_messages"
 PORTFOLIO_UPLOAD_WIDGET_KEY = "ii_csv_upload"
 ERP_THRESHOLD_KEY = "erp_threshold_pct"
+RPI_ASSUMPTION_KEY = "expected_rpi_pct"
 DURATION_FLOOR_KEY = "duration_floor_years"
 DURATION_CEILING_KEY = "duration_ceiling_years"
 LIQUIDITY_THRESHOLD_KEY = "liquidity_concentration_10y_plus_pct"
@@ -253,16 +256,18 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         SELECT
             p.isin,
             r.instrument_name,
+            r.instrument_type,
             p.maturity_date,
             p.coupon_pct,
             p.clean_price_gbp,
             p.gry_pct,
+            p.real_gry_pct,
+            p.nominal_equivalent_gry_pct,
             p.modified_duration_years
         FROM gilt_price_cache p
         JOIN gilt_reference r ON r.isin = p.isin
-        WHERE r.instrument_type = 'Conventional'
-          AND p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
-        ORDER BY p.gry_pct DESC NULLS LAST, p.maturity_date ASC
+        WHERE p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
+        ORDER BY p.maturity_date ASC
         """,
         ttl=60,
     )
@@ -429,12 +434,17 @@ def _build_gilt_candidate_warnings(
 ) -> list[str]:
     warnings: list[str] = []
     total_ref = int(gilt_ref_count.iloc[0]["total"]) if not gilt_ref_count.empty else 0
-    unpriced_count = max(0, total_ref - len(gilt_ranking))
+    conventional = (
+        gilt_ranking[gilt_ranking["instrument_type"] == "Conventional"]
+        if "instrument_type" in gilt_ranking.columns
+        else gilt_ranking
+    )
+    unpriced_count = max(0, total_ref - len(conventional))
     if unpriced_count:
         warnings.append(
             f"{unpriced_count} gilt(s) have no current price in the market snapshot"
         )
-    no_analytics = int(gilt_ranking["gry_pct"].isna().sum())
+    no_analytics = int(conventional["gry_pct"].isna().sum())
     if no_analytics:
         warnings.append(
             f"{no_analytics} gilt(s) have a price but missing GRY analytics"
@@ -686,7 +696,10 @@ def render_refresh_controls(
                     "lse_tidm_bridge": tidm_handler,
                     "non_gilt_reference": non_gilt_reference_handler,
                     "lse_gilt_prices": lse_gilt_prices_handler,
-                    "gilt_analytics": gilt_analytics_handler,
+                    "gilt_analytics": partial(
+                        gilt_analytics_handler,
+                        rpi_assumption_pct=float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0)) or None,
+                    ),
                     "yfinance_equities": yfinance_equities_handler,
                 },
             )
@@ -789,6 +802,24 @@ def render_sidebar(
             step=0.25,
             key=ERP_THRESHOLD_KEY,
             help="ERP below this level triggers the warning banner.",
+        )
+        st.divider()
+        st.caption("Index-Linked Gilts")
+        if RPI_ASSUMPTION_KEY not in st.session_state:
+            st.session_state[RPI_ASSUMPTION_KEY] = float(
+                _policy_field_default("expected_rpi_pct") or 3.0
+            )
+        st.number_input(
+            "RPI assumption (%)",
+            min_value=0.0,
+            max_value=15.0,
+            step=0.25,
+            key=RPI_ASSUMPTION_KEY,
+            help=(
+                "Assumed annual RPI inflation used to compute IL gilt real GRY and "
+                "nominal-equivalent yield for comparison with conventional gilts. "
+                "Set to 0 to exclude IL gilts from yield ranking and optimisation."
+            ),
         )
         st.divider()
         st.caption("Duration & Liquidity")
@@ -945,7 +976,15 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
 
 
 def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None) -> None:
-    st.subheader("Conventional Gilt Ranking")
+    rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
+
+    if "instrument_type" in df.columns:
+        il_df = df[df["instrument_type"] == "Index-linked"]
+        df = df[df["instrument_type"] == "Conventional"].copy()
+    else:
+        il_df = pd.DataFrame()
+
+    st.subheader("Gilt Ranking")
     for w in warnings or []:
         st.warning(w)
     if df.empty:
@@ -954,6 +993,15 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
             "Run a market data refresh to populate the ranking."
         )
         return
+
+    # Build the display DataFrame: conventional by gry_pct; IL by nominal_equivalent_gry_pct
+    if rpi_assumption and not il_df.empty:
+        il_with_analytics = il_df[il_df["nominal_equivalent_gry_pct"].notna()].copy()
+        if not il_with_analytics.empty:
+            il_with_analytics = il_with_analytics.assign(
+                gry_pct=il_with_analytics["nominal_equivalent_gry_pct"]
+            )
+            df = pd.concat([df, il_with_analytics], ignore_index=True)
 
     if df["gry_pct"].isna().all():
         st.warning(
@@ -974,6 +1022,8 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
         )
         return
 
+    df = df.sort_values("gry_pct", ascending=False, na_position="last").reset_index(drop=True)
+
     best_gry = df["gry_pct"].max()
     lowest_duration = df["modified_duration_years"].min()
     gilt_count = len(df)
@@ -983,7 +1033,8 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
     col2.metric("Lowest Duration", f"{lowest_duration:.2f} yrs" if pd.notna(lowest_duration) else "—")
     col3.metric("Gilts in Snapshot", str(gilt_count))
 
-    display_df = df.assign(gry_pct=df["gry_pct"] * 100)
+    display_cols = ["isin", "instrument_name", "maturity_date", "coupon_pct", "clean_price_gbp", "gry_pct", "modified_duration_years"]
+    display_df = df[[c for c in display_cols if c in df.columns]].assign(gry_pct=df["gry_pct"] * 100)
     st.dataframe(
         display_df,
         width="stretch",
@@ -998,7 +1049,23 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
             "modified_duration_years": st.column_config.NumberColumn("Mod. Duration", format="%.2f"),
         },
     )
-    st.caption("Ranked by GRY descending. Interactive re-sorting may reorder rows with missing analytics.")
+
+    il_held = not il_df.empty
+    if rpi_assumption and il_held:
+        neq_col = "nominal_equivalent_gry_pct"
+        il_uncomputed = int(il_df[neq_col].isna().sum()) if neq_col in il_df.columns else len(il_df)
+        if il_uncomputed:
+            st.info(
+                f"{il_uncomputed} index-linked gilt(s) are held but have no computed real GRY yet. "
+                "Run a market data refresh to include them in the ranking."
+            )
+    elif il_held and not rpi_assumption:
+        il_count = len(il_df)
+        st.info(
+            f"{il_count} index-linked gilt(s) are excluded from this ranking because no RPI assumption "
+            "is set. Set an RPI assumption in the sidebar to include them in yield comparison and optimisation."
+        )
+    st.caption("Ranked by GRY descending. IL gilts use nominal-equivalent GRY at the assumed RPI.")
 
 
 def render_equity_macro_signal_card(
@@ -1154,6 +1221,29 @@ def render_duration_liquidity_signal_card(
         st.warning(signal.explanation)
     else:
         st.info(signal.explanation)
+
+
+def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
+    """Return gilt ranking for LP: conventional always; IL only when RPI set and analytics present."""
+    rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
+
+    if "instrument_type" not in gilt_ranking.columns:
+        return gilt_ranking
+
+    conventional = gilt_ranking[gilt_ranking["instrument_type"] == "Conventional"].copy()
+    if not rpi_assumption:
+        return conventional
+
+    if "nominal_equivalent_gry_pct" not in gilt_ranking.columns:
+        return conventional
+
+    il = gilt_ranking[
+        (gilt_ranking["instrument_type"] == "Index-linked")
+        & gilt_ranking["nominal_equivalent_gry_pct"].notna()
+    ].copy()
+    il["gry_pct"] = il["nominal_equivalent_gry_pct"]
+
+    return pd.concat([conventional, il], ignore_index=True)
 
 
 def render_signals_tab(state: dict[str, Any]) -> None:
@@ -1433,13 +1523,14 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
     if st.button("Generate recommendation", type="primary", key="lp_recommend_btn"):
         with st.spinner("Running portfolio optimisation…", show_time=True):
             enriched = enrich_with_buckets(holdings)
+            gilt_ranking_df = _build_lp_gilt_ranking(state["gilt_ranking"])
             result = build_lp_recommendation(
                 enriched_holdings_df=enriched,
                 baseline_weights=current_baseline.weights,
                 baseline_label=current_baseline.label,
                 policy=policy,
                 snapshot_date=snapshot_date,
-                gilt_ranking_df=state["gilt_ranking"],
+                gilt_ranking_df=gilt_ranking_df,
             )
         if result.solver_status != "optimal":
             st.error(

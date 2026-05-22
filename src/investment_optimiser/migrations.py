@@ -461,6 +461,19 @@ def create_strategic_baseline_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def add_il_gilt_gry_columns(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(gilt_price_cache)")
+    }
+    if "real_gry_pct" not in existing_columns:
+        connection.execute("ALTER TABLE gilt_price_cache ADD COLUMN real_gry_pct REAL")
+    if "nominal_equivalent_gry_pct" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE gilt_price_cache ADD COLUMN nominal_equivalent_gry_pct REAL"
+        )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -470,4 +483,5 @@ MIGRATIONS: list[Migration] = [
     add_gilt_analytics_refresh_source,
     create_strategic_baseline_table,
     add_portfolio_snapshot_maturity_date,
+    add_il_gilt_gry_columns,
 ]
