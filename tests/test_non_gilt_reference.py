@@ -4,34 +4,27 @@ from pathlib import Path
 import sqlite3
 
 from investment_optimiser.db import initialize_database
-from investment_optimiser.non_gilt_reference import (
-    _extract_company_page_url,
-    non_gilt_reference_handler,
-)
+from investment_optimiser.non_gilt_reference import non_gilt_reference_handler
 from investment_optimiser.portfolio_import import Holding, replace_portfolio_snapshot
 
 
-def test_non_gilt_reference_handler_persists_classifications_for_latest_snapshot_symbols(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def _make_db(tmp_path: Path) -> tuple[Path, str]:
     db_path = tmp_path / "investment_optimiser.db"
     database_url = f"sqlite:///{db_path.as_posix()}"
     initialize_database(database_url)
+    return db_path, database_url
+
+
+def test_non_gilt_reference_handler_classifies_via_yahoo_quote_type(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path, database_url = _make_db(tmp_path)
 
     replace_portfolio_snapshot(
         database_url,
         snapshot_date="2026-05-19",
         holdings=[
-            Holding(
-                symbol="REL",
-                name="RELX PLC",
-                asset_type="other",
-                qty=10.0,
-                clean_price_gbp=24.62,
-                market_value_gbp=246.2,
-                book_cost_gbp=200.0,
-            ),
             Holding(
                 symbol="VUAG",
                 name="Vanguard S&P 500 UCITS ETF",
@@ -42,73 +35,124 @@ def test_non_gilt_reference_handler_persists_classifications_for_latest_snapshot
                 book_cost_gbp=500.0,
             ),
             Holding(
-                symbol="CSH2",
-                name="Royal London Short Term Money Market",
-                asset_type="mmf",
-                qty=250.0,
-                clean_price_gbp=1.0,
-                market_value_gbp=250.0,
-                book_cost_gbp=250.0,
+                symbol="SMT",
+                name="Scottish Mortgage Investment Trust PLC",
+                asset_type="other",
+                qty=100.0,
+                clean_price_gbp=8.50,
+                market_value_gbp=850.0,
+                book_cost_gbp=700.0,
+            ),
+            Holding(
+                symbol="LAND",
+                name="Land Securities Group PLC",
+                asset_type="other",
+                qty=50.0,
+                clean_price_gbp=6.50,
+                market_value_gbp=325.0,
+                book_cost_gbp=300.0,
+            ),
+            Holding(
+                symbol="REL",
+                name="RELX PLC",
+                asset_type="other",
+                qty=10.0,
+                clean_price_gbp=24.62,
+                market_value_gbp=246.2,
+                book_cost_gbp=200.0,
             ),
         ],
     )
 
-    pages = {
-        "REL": """
-            <html><body>
-            <h1>RELX PLC</h1>
-            <div>FCA listing Category</div>
-            <div>Equity shares (commercial companies)</div>
-            </body></html>
-        """,
-        "VUAG": """
-            <html><body>
-            <h1>VANGUARD S&P 500 UCITS ETF</h1>
-            <div>ETFs</div>
-            </body></html>
-        """,
+    yahoo_info: dict[str, dict] = {
+        "VUAG.L": {"quoteType": "ETF", "longName": "Vanguard S&P 500 UCITS ETF"},
+        "SMT.L": {
+            "quoteType": "EQUITY",
+            "longName": "Scottish Mortgage Investment Trust PLC",
+            "sector": "Financial Services",
+            "industry": "Asset Management",
+        },
+        "LAND.L": {
+            "quoteType": "EQUITY",
+            "longName": "Land Securities Group PLC",
+            "sector": "Real Estate",
+            "industry": "REIT—Diversified",
+        },
+        "REL.L": {
+            "quoteType": "EQUITY",
+            "longName": "RELX PLC",
+            "sector": "Industrials",
+            "industry": "Specialty Business Services",
+        },
     }
 
     monkeypatch.setattr(
-        "investment_optimiser.non_gilt_reference._fetch_html",
-        lambda symbol: pages[symbol],
+        "investment_optimiser.non_gilt_reference._fetch_yahoo_info",
+        lambda symbol: yahoo_info.get(symbol, {}),
     )
 
     with sqlite3.connect(db_path) as connection:
         non_gilt_reference_handler(connection)
         rows = connection.execute(
             """
-            SELECT symbol, instrument_name, asset_type, source_name, source_label
+            SELECT symbol, asset_type, source_name, source_label
             FROM non_gilt_reference
             ORDER BY symbol ASC
             """
         ).fetchall()
 
     assert rows == [
-        (
-            "REL",
-            "RELX PLC",
-            "equity",
-            "lse_company_page",
-            "Equity shares (commercial companies)",
-        ),
-        (
-            "VUAG",
-            "VANGUARD S&P 500 UCITS ETF",
-            "etf",
-            "lse_company_page",
-            "ETFs",
-        ),
+        ("LAND", "reit", "yahoo_finance", "EQUITY"),
+        ("REL", "equity", "yahoo_finance", "EQUITY"),
+        ("SMT", "investment_trust", "yahoo_finance", "EQUITY"),
+        ("VUAG", "etf", "yahoo_finance", "ETF"),
     ]
+
+
+def test_non_gilt_reference_handler_classifies_mutualfund_as_fund(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path, database_url = _make_db(tmp_path)
+
+    replace_portfolio_snapshot(
+        database_url,
+        snapshot_date="2026-05-19",
+        holdings=[
+            Holding(
+                symbol="RLAM",
+                name="Royal London Asset Management Fund",
+                asset_type="other",
+                qty=100.0,
+                clean_price_gbp=1.20,
+                market_value_gbp=120.0,
+                book_cost_gbp=100.0,
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(
+        "investment_optimiser.non_gilt_reference._fetch_yahoo_info",
+        lambda _symbol: {
+            "quoteType": "MUTUALFUND",
+            "longName": "Royal London Asset Management Fund",
+        },
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        non_gilt_reference_handler(connection)
+        row = connection.execute(
+            "SELECT asset_type, source_name FROM non_gilt_reference"
+        ).fetchone()
+
+    assert row == ("fund", "yahoo_finance")
 
 
 def test_non_gilt_reference_handler_reclassifies_existing_snapshot_rows(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    db_path = tmp_path / "investment_optimiser.db"
-    database_url = f"sqlite:///{db_path.as_posix()}"
-    initialize_database(database_url)
+    db_path, database_url = _make_db(tmp_path)
 
     replace_portfolio_snapshot(
         database_url,
@@ -131,14 +175,13 @@ def test_non_gilt_reference_handler_reclassifies_existing_snapshot_rows(
     )
 
     monkeypatch.setattr(
-        "investment_optimiser.non_gilt_reference._fetch_html",
-        lambda _symbol: """
-            <html><body>
-            <h1>RELX PLC</h1>
-            <div>FCA listing Category</div>
-            <div>Equity shares (commercial companies)</div>
-            </body></html>
-        """,
+        "investment_optimiser.non_gilt_reference._fetch_yahoo_info",
+        lambda _symbol: {
+            "quoteType": "EQUITY",
+            "longName": "RELX PLC",
+            "sector": "Industrials",
+            "industry": "Publishing",
+        },
     )
 
     with sqlite3.connect(db_path) as connection:
@@ -155,25 +198,11 @@ def test_non_gilt_reference_handler_reclassifies_existing_snapshot_rows(
     assert row == ("equity", None)
 
 
-def test_extract_company_page_url_accepts_root_stock_page_with_query_string() -> None:
-    search_html = """
-        <html><body>
-        <a href="/stock/ADM/admiral-group-plc?lang=en">Admiral Group</a>
-        </body></html>
-    """
-
-    assert _extract_company_page_url(search_html, "ADM") == (
-        "https://www.londonstockexchange.com/stock/ADM/admiral-group-plc?lang=en"
-    )
-
-
-def test_non_gilt_reference_handler_falls_back_to_name_heuristic_when_fetch_fails(
+def test_non_gilt_reference_handler_falls_back_to_name_heuristic_when_yahoo_returns_empty(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    db_path = tmp_path / "investment_optimiser.db"
-    database_url = f"sqlite:///{db_path.as_posix()}"
-    initialize_database(database_url)
+    db_path, database_url = _make_db(tmp_path)
 
     replace_portfolio_snapshot(
         database_url,
@@ -195,12 +224,9 @@ def test_non_gilt_reference_handler_falls_back_to_name_heuristic_when_fetch_fail
         ],
     )
 
-    def raise_fetch_error(_symbol: str) -> str:
-        raise ValueError("No LSE company page found.")
-
     monkeypatch.setattr(
-        "investment_optimiser.non_gilt_reference._fetch_html",
-        raise_fetch_error,
+        "investment_optimiser.non_gilt_reference._fetch_yahoo_info",
+        lambda _symbol: {},
     )
 
     with sqlite3.connect(db_path) as connection:

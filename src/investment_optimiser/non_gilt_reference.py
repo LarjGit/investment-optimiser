@@ -2,21 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from html import unescape
-import re
 import sqlite3
-import urllib.parse
-import urllib.request
+import time
+
+import yfinance as yf
 
 
-_SEARCH_URL = "https://www.londonstockexchange.com/search"
-_USER_AGENT = "investment-optimiser/1.0"
 _UNCLASSIFIED_ASSET_WARNING = (
     "Asset type could not be classified confidently; defaulted to 'other'."
 )
-_STOCK_PAGE_PATTERN = re.compile(r'href="(?P<path>/stock/[^"]+)"', re.IGNORECASE)
-_H1_PATTERN = re.compile(r"<h1[^>]*>(?P<value>.*?)</h1>", re.IGNORECASE | re.DOTALL)
-_TAG_PATTERN = re.compile(r"<[^>]+>")
+_INVESTMENT_TRUST_SIGNALS = (
+    "investment trust",
+    "investment company",
+    "trust plc",
+    "it plc",
+    "fund plc",
+)
+_INTER_REQUEST_DELAY = 2.0
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ def non_gilt_reference_handler(connection: sqlite3.Connection) -> None:
             rows.append(parsed_row)
 
     if not rows:
-        raise ValueError("LSE non-gilt reference refresh produced no classified symbols.")
+        raise ValueError("Non-gilt reference refresh produced no classified symbols.")
 
     connection.execute("DELETE FROM non_gilt_reference")
     connection.executemany(
@@ -100,31 +102,66 @@ def _load_refresh_symbols(connection: sqlite3.Connection) -> dict[str, str]:
     return dict(sorted(symbols.items()))
 
 
-def _fetch_html(symbol: str) -> str:
-    company_page_url = _resolve_company_page_url(symbol)
-    request = urllib.request.Request(
-        company_page_url,
-        headers={"User-Agent": _USER_AGENT},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read()
-    return raw.decode("utf-8", errors="replace")
-
-
 def _build_reference_row(
     symbol: str,
     instrument_name: str,
     last_updated: str,
 ) -> NonGiltReferenceRow | None:
-    try:
-        html = _fetch_html(symbol)
-    except Exception:
-        return _build_name_heuristic_row(symbol, instrument_name, last_updated)
+    yahoo_ticker = _to_yahoo_ticker(symbol)
+    info = _fetch_yahoo_info(yahoo_ticker)
+    asset_type, source_label = _classify_from_yahoo_info(info)
 
-    parsed_row = _parse_reference_row(symbol, html, last_updated)
-    if parsed_row is not None:
-        return parsed_row
+    if asset_type is not None:
+        return NonGiltReferenceRow(
+            symbol=symbol,
+            instrument_name=instrument_name,
+            asset_type=asset_type,
+            source_name="yahoo_finance",
+            source_label=source_label,
+            last_updated=last_updated,
+        )
+
     return _build_name_heuristic_row(symbol, instrument_name, last_updated)
+
+
+def _to_yahoo_ticker(symbol: str) -> str:
+    if "." in symbol:
+        return symbol
+    return f"{symbol}.L"
+
+
+def _fetch_yahoo_info(yahoo_ticker: str) -> dict:
+    try:
+        info = yf.Ticker(yahoo_ticker).info
+        time.sleep(_INTER_REQUEST_DELAY)
+        return info if isinstance(info, dict) else {}
+    except Exception:
+        return {}
+
+
+def _classify_from_yahoo_info(info: dict) -> tuple[str | None, str]:
+    quote_type = info.get("quoteType", "")
+
+    if quote_type == "ETF":
+        return "etf", quote_type
+
+    if quote_type == "MUTUALFUND":
+        return "fund", quote_type
+
+    if quote_type == "EQUITY":
+        sector = info.get("sector", "")
+        industry = info.get("industry", "")
+        long_name = info.get("longName", "").lower()
+
+        if sector == "Real Estate" and "REIT" in industry:
+            return "reit", quote_type
+
+        if any(signal in long_name for signal in _INVESTMENT_TRUST_SIGNALS):
+            return "investment_trust", quote_type
+
+        return "equity", quote_type
+
+    return None, ""
 
 
 def _build_name_heuristic_row(
@@ -144,111 +181,6 @@ def _build_name_heuristic_row(
         source_label=source_label,
         last_updated=last_updated,
     )
-
-
-def _resolve_company_page_url(symbol: str) -> str:
-    query = urllib.parse.urlencode({"searchtype": "all", "q": symbol})
-    request = urllib.request.Request(
-        f"{_SEARCH_URL}?{query}",
-        headers={"User-Agent": _USER_AGENT},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        search_html = response.read().decode("utf-8", errors="replace")
-
-    return _extract_company_page_url(search_html, symbol)
-
-
-def _extract_company_page_url(search_html: str, symbol: str) -> str:
-    normalized_symbol = symbol.upper()
-    fallback_path: str | None = None
-
-    for match in _STOCK_PAGE_PATTERN.finditer(search_html):
-        href = unescape(match.group("path"))
-        parsed = urllib.parse.urlparse(href)
-        segments = [segment for segment in parsed.path.split("/") if segment]
-        if len(segments) < 3 or segments[0] != "stock":
-            continue
-        if segments[1].upper() != normalized_symbol:
-            continue
-
-        path_with_query = parsed.path
-        if parsed.query:
-            path_with_query = f"{path_with_query}?{parsed.query}"
-
-        if len(segments) >= 4 and segments[3] == "company-page":
-            return f"https://www.londonstockexchange.com{path_with_query}"
-        if len(segments) == 3 and fallback_path is None:
-            fallback_path = path_with_query
-
-    if fallback_path is not None:
-        return f"https://www.londonstockexchange.com{fallback_path}"
-    raise ValueError(f"No LSE company page found for symbol {symbol}.")
-
-
-def _parse_reference_row(
-    symbol: str,
-    html: str,
-    last_updated: str,
-) -> NonGiltReferenceRow | None:
-    instrument_name = _extract_instrument_name(html)
-    source_label = _extract_source_label(html, instrument_name)
-    asset_type = _map_asset_type(instrument_name, source_label)
-    if asset_type is None:
-        return None
-
-    return NonGiltReferenceRow(
-        symbol=symbol,
-        instrument_name=instrument_name,
-        asset_type=asset_type,
-        source_name="lse_company_page",
-        source_label=source_label,
-        last_updated=last_updated,
-    )
-
-
-def _extract_instrument_name(html: str) -> str:
-    match = _H1_PATTERN.search(html)
-    if match is None:
-        raise ValueError("LSE company page did not contain a heading.")
-
-    value = _strip_tags(match.group("value")).strip()
-    if not value:
-        raise ValueError("LSE company page heading was empty.")
-    return value
-
-
-def _extract_source_label(html: str, instrument_name: str) -> str:
-    text = _normalized_text(html)
-    candidate_labels = [
-        "Closed-ended investment funds",
-        "Equity shares (commercial companies)",
-        "Real Estate Investment Trusts",
-        "ETFs",
-        "Equity",
-    ]
-    for label in candidate_labels:
-        if label.lower() in text:
-            return label
-
-    if "reit" in instrument_name.lower():
-        return "Real Estate Investment Trusts"
-
-    raise ValueError("LSE company page did not expose a supported type label.")
-
-
-def _map_asset_type(instrument_name: str, source_label: str) -> str | None:
-    normalized_name = instrument_name.lower()
-    normalized_label = source_label.lower()
-
-    if "reit" in normalized_name or "real estate investment trust" in normalized_label:
-        return "reit"
-    if normalized_label == "etfs":
-        return "etf"
-    if normalized_label == "closed-ended investment funds":
-        return "investment_trust"
-    if normalized_label in {"equity", "equity shares (commercial companies)"}:
-        return "equity"
-    return None
 
 
 def _classify_name_label(instrument_name: str) -> str | None:
@@ -281,16 +213,6 @@ def _map_name_label_to_asset_type(source_label: str) -> str:
     if source_label == "fund":
         return "fund"
     return "equity"
-
-
-def _normalized_text(html: str) -> str:
-    text = _strip_tags(html)
-    text = text.replace("\xa0", " ")
-    return " ".join(text.lower().split())
-
-
-def _strip_tags(value: str) -> str:
-    return unescape(_TAG_PATTERN.sub(" ", value))
 
 
 def _reclassify_portfolio_snapshots(connection: sqlite3.Connection) -> None:
