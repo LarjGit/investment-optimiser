@@ -6,6 +6,7 @@ import sqlite3
 from investment_optimiser.equity_signals import (
     classify_curve_state,
     evaluate_duration_liquidity_signal,
+    evaluate_equity_opportunity_signal,
     evaluate_erp_signal,
     evaluate_yield_curve_shape_signal,
     fetch_best_conventional_gry,
@@ -284,3 +285,21 @@ def run_signal_persistence(
         }) if liquidity_firing else "{}",
         now=now,
     )
+
+    benchmark_ticker = str(schema_fields.get("benchmark_ticker", "SWRD.L"))
+    opp_signal = evaluate_equity_opportunity_signal(conn, benchmark_ticker)
+
+    if opp_signal.composite_score is not None and opp_signal.trend_dampener is not None:
+        opp_metrics: list[tuple[str, float, str]] = [
+            ("composite_score", opp_signal.composite_score, "score"),
+            ("components_available", float(opp_signal.components_available), "count"),
+            ("is_degraded", float(opp_signal.is_degraded), "bool"),
+            ("trend_dampener", opp_signal.trend_dampener, "ratio"),
+        ]
+        if opp_signal.erp_component is not None:
+            opp_metrics.append(("erp_component", opp_signal.erp_component, "percentile"))
+        if opp_signal.valuation_component is not None:
+            opp_metrics.append(("valuation_component", opp_signal.valuation_component, "percentile"))
+        if opp_signal.drawdown_component is not None:
+            opp_metrics.append(("drawdown_component", opp_signal.drawdown_component, "percentile"))
+        write_signal_readings(conn, reading_date=reading_date, signal_name="equity_opportunity", metrics=opp_metrics)

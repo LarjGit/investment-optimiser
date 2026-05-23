@@ -6,6 +6,15 @@ import sqlite3
 
 import pandas as pd
 
+_MIN_HISTORY_DEFAULT = 30
+_TREND_EMA_FAST = 50
+_TREND_EMA_SLOW = 200
+_TREND_DAMPENER_BEAR_DEFAULT = 0.75
+
+_BAND_HIGHLY_ATTRACTIVE = 0.72
+_BAND_ATTRACTIVE = 0.55
+_BAND_MODEST = 0.35
+
 try:
     from govuk_bank_holidays.bank_holidays import BankHolidays
     _bh = BankHolidays()
@@ -392,4 +401,201 @@ def evaluate_yield_curve_shape_signal(
         ten_year_pct=round(ten_y, 4),
         cache_date=cache_date,
         explanation=explanation,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Equity opportunity overlay
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class EquityOpportunitySignal:
+    state: str
+    composite_score: float | None
+    erp_component: float | None
+    valuation_component: float | None
+    drawdown_component: float | None
+    trend_dampener: float | None
+    components_available: int
+    is_degraded: bool
+    explanation: str
+
+
+def _score_to_opportunity_band(score: float) -> str:
+    if score >= _BAND_HIGHLY_ATTRACTIVE:
+        return "highly_attractive"
+    if score >= _BAND_ATTRACTIVE:
+        return "attractive"
+    if score >= _BAND_MODEST:
+        return "modest"
+    return "neutral"
+
+
+def _compute_erp_component(conn: sqlite3.Connection, min_history: int) -> float | None:
+    rows = conn.execute(
+        "SELECT value FROM signal_readings "
+        "WHERE signal_name='erp' AND metric_name='erp_pct' "
+        "ORDER BY reading_date ASC"
+    ).fetchall()
+    if len(rows) < min_history:
+        return None
+    series = pd.Series([float(r[0]) for r in rows])
+    return float(series.expanding().rank(pct=True).iloc[-1])
+
+
+def _compute_valuation_component(conn: sqlite3.Connection, min_history: int) -> float | None:
+    rows = conn.execute(
+        "SELECT pe_ratio FROM equity_valuation_cache "
+        "WHERE source_name='yfinance_equities' "
+        "ORDER BY cache_date ASC"
+    ).fetchall()
+    if len(rows) < min_history:
+        return None
+    earnings_yields = pd.Series([1.0 / float(r[0]) for r in rows])
+    return float(earnings_yields.expanding().rank(pct=True).iloc[-1])
+
+
+def _compute_drawdown_component(
+    conn: sqlite3.Connection,
+    ticker: str,
+    min_history: int,
+) -> float | None:
+    rows = conn.execute(
+        "SELECT close_price FROM equity_benchmark_prices "
+        "WHERE ticker=? "
+        "ORDER BY price_date ASC",
+        (ticker,),
+    ).fetchall()
+    if len(rows) < min_history:
+        return None
+    prices = pd.Series([float(r[0]) for r in rows])
+    rolling_peak = prices.rolling(252, min_periods=1).max()
+    drawdown_magnitude = (rolling_peak - prices) / rolling_peak
+    return float(drawdown_magnitude.expanding().rank(pct=True).iloc[-1])
+
+
+def _compute_trend_dampener(
+    conn: sqlite3.Connection,
+    ticker: str,
+    trend_dampener_bear: float,
+) -> float:
+    rows = conn.execute(
+        "SELECT close_price FROM equity_benchmark_prices "
+        "WHERE ticker=? "
+        "ORDER BY price_date ASC",
+        (ticker,),
+    ).fetchall()
+    if len(rows) < _TREND_EMA_SLOW:
+        return 1.0
+    prices = pd.Series([float(r[0]) for r in rows])
+    fast_ema = prices.ewm(span=_TREND_EMA_FAST, adjust=False).mean()
+    slow_ema = prices.ewm(span=_TREND_EMA_SLOW, adjust=False).mean()
+    if fast_ema.iloc[-1] < slow_ema.iloc[-1]:
+        return trend_dampener_bear
+    return 1.0
+
+
+def _opportunity_explanation(
+    state: str,
+    is_degraded: bool,
+    erp: float | None,
+    valuation: float | None,
+    drawdown: float | None,
+    dampener: float,
+) -> str:
+    band_intro = {
+        "highly_attractive": "Highly attractive entry conditions historically.",
+        "attractive": "Attractive entry conditions historically.",
+        "modest": "Modest opportunity — conditions are somewhat favourable.",
+        "neutral": "Neutral — no strong historical entry signal right now.",
+    }
+    parts = [band_intro[state]]
+
+    if erp is not None:
+        if erp >= 0.6:
+            parts.append("Equities offer a favourable premium over available gilt yields.")
+        elif erp <= 0.3:
+            parts.append("Equity premium over gilts is historically low.")
+
+    if valuation is not None:
+        if valuation >= 0.6:
+            parts.append("Global equities are cheap relative to their own recent history.")
+        elif valuation <= 0.3:
+            parts.append("Global equities are expensive relative to their own recent history.")
+
+    if drawdown is not None:
+        if drawdown >= 0.6:
+            parts.append(
+                "Markets are materially below their recent high, "
+                "which historically improves long-term entry conditions."
+            )
+        elif drawdown <= 0.3:
+            parts.append("Markets are near their recent high — limited drawdown discount.")
+
+    if dampener < 1.0:
+        parts.append("Trend conditions are weak; the score has been dampened rather than blocked.")
+
+    if is_degraded:
+        parts.append("Score is based on fewer than all three components — treat with caution.")
+
+    return " ".join(parts)
+
+
+def _unavailable_explanation(
+    erp: float | None,
+    valuation: float | None,
+    drawdown: float | None,
+) -> str:
+    missing = [
+        name
+        for name, val in (("ERP history", erp), ("valuation history", valuation), ("price history", drawdown))
+        if val is None
+    ]
+    return (
+        f"Insufficient history for a composite score ({', '.join(missing)} not yet available). "
+        "Run more market refreshes to build up the historical series."
+    )
+
+
+def evaluate_equity_opportunity_signal(
+    conn: sqlite3.Connection,
+    benchmark_ticker: str,
+    min_history: int = _MIN_HISTORY_DEFAULT,
+    trend_dampener_bear: float = _TREND_DAMPENER_BEAR_DEFAULT,
+) -> EquityOpportunitySignal:
+    erp = _compute_erp_component(conn, min_history)
+    valuation = _compute_valuation_component(conn, min_history)
+    drawdown = _compute_drawdown_component(conn, benchmark_ticker, min_history)
+
+    available = [c for c in [erp, valuation, drawdown] if c is not None]
+    n = len(available)
+
+    if n < 2:
+        return EquityOpportunitySignal(
+            state="unavailable",
+            composite_score=None,
+            erp_component=erp,
+            valuation_component=valuation,
+            drawdown_component=drawdown,
+            trend_dampener=None,
+            components_available=n,
+            is_degraded=False,
+            explanation=_unavailable_explanation(erp, valuation, drawdown),
+        )
+
+    is_degraded = n < 3
+    dampener = _compute_trend_dampener(conn, benchmark_ticker, trend_dampener_bear)
+    composite = round(sum(available) / n * dampener, 4)
+    state = _score_to_opportunity_band(composite)
+
+    return EquityOpportunitySignal(
+        state=state,
+        composite_score=composite,
+        erp_component=erp,
+        valuation_component=valuation,
+        drawdown_component=drawdown,
+        trend_dampener=dampener,
+        components_available=n,
+        is_degraded=is_degraded,
+        explanation=_opportunity_explanation(state, is_degraded, erp, valuation, drawdown, dampener),
     )
