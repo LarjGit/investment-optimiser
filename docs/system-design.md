@@ -118,7 +118,7 @@ The dashboard upload flow stores the imported CSV to `data/portfolio_latest.csv`
 
 ## Allocation Engine
 
-The allocation engine is a whole-portfolio, hierarchical allocator anchored to a user-authored strategic baseline. It is explicitly not a narrow bond optimiser with a separate equity sleeve bolted on. A top layer allocates across active sleeves or asset buckets; lower-level sleeve modules implement their assigned budget with sleeve-specific logic and diagnostics. Weakly modelled sleeves remain bounded and confidence-limited instead of being pushed through a fake expected-return model.
+The allocation engine is a whole-portfolio allocator anchored to a user-authored strategic baseline. It is explicitly not a narrow bond optimiser with a separate equity sleeve bolted on. A top layer allocates across asset buckets; weakly modelled buckets remain bounded rather than pushed through a fake expected-return model.
 
 ### Portfolio-Level Policy
 
@@ -132,7 +132,9 @@ The frozen v1 policy pack lives in `src/investment_optimiser/policy_pack_v1.json
 
 Hard policy constraints include full investment, long-only positioning in v1, baseline tilt bands, regime-aware turnover limits, and adverse-scenario acceptability floors. Sleeve-local constraints include maturity caps, concentration caps, MMF or cash floors, and liquidity floors for the fixed-income sleeve.
 
-The objective is a deterministic attractiveness score rather than a claim to precise cross-asset expected returns. Confidence acts primarily by tightening tilt bands around baseline and secondarily by scaling sleeve scores. Current holdings matter for turnover, friction, and migration pacing, but they are not treated as the policy anchor.
+The objective is a deterministic attractiveness score rather than a claim to precise cross-asset expected returns. Current holdings matter for turnover, friction, and migration pacing, but they are not treated as the policy anchor.
+
+A confidence mechanism that dynamically tightens tilt bands when signal certainty is low is the intended design but is not yet built. The practical constraint is that tilt bands and turnover limits can jointly produce LP infeasibility when starting positions are far from baseline — dynamic tightening would require handling that interaction explicitly before it can be added safely.
 
 ### Solver Design
 
@@ -150,14 +152,9 @@ The design preserves useful diagnostics such as slacks, marginals, and explicit 
 
 ### Robustness and Regime Handling
 
-The allocator supports staged convergence rather than one-shot portfolio reshaping. It imposes a hard turnover budget against current holdings, tighter in constructive or normal regimes and wider in more defensive regimes. Cash flows such as contributions, withdrawals, coupons, dividends, maturities, and existing cash or MMF balances are deployed first before discretionary sells.
+The allocator supports staged convergence rather than one-shot portfolio reshaping. It imposes a hard turnover budget against current holdings, tighter in constructive or normal regimes and wider in more defensive regimes. Existing cash and MMF balances are deployed before discretionary sells. Tracking upcoming cash inflows — coupon receipts, gilt maturities, new contributions — as explicit pre-deployment inputs is not yet implemented.
 
-Scenario robustness is hybrid:
-
-1. a weighted multi-scenario attractiveness objective
-2. explicit hard floors for a small set of adverse scenarios
-
-If scenario floors conflict with policy bounds or turnover limits, the solve fails visibly. No hidden constraint relaxation is allowed.
+Scenario robustness uses explicit hard floors for a small set of adverse scenarios, encoded as LP inequality constraints. If scenario floors conflict with policy bounds or turnover limits, the solve fails visibly. No hidden constraint relaxation is allowed.
 
 ### Fixed-Income Candidate Universe and GRY Calculation
 
@@ -171,27 +168,23 @@ Settlement is `T+1` using England and Wales bank holidays. Coupon schedules are 
 
 Index-linked gilt real GRY is a separate calculation built in a dedicated slice after the shared GRY engine. The real yield solve uses the same Newton/brentq path but with the redemption cash flow uplifted by the projected index ratio derived from the user-supplied RPI assumption. The nominal-equivalent yield is then computed from the real yield using the Fisher equation. The RPI assumption is a sidebar input that is added to the session state and frozen as a named field in `policy_pack_v1.json` in the same slice. Until that slice is built, IL gilts are priced and held in the portfolio but excluded from yield ranking, switch logic, and the LP candidate universe.
 
-### Sleeve Contract and Fallbacks
+### Recommendation Pipeline
 
-Each sleeve must return:
+`lp_recommendation.py` owns the full post-solve pipeline as a single coordinated flow:
 
-- target sleeve weights and or trades
-- local confidence
-- scenario pass or fail summary
-- binding constraints
-- degraded-mode flags
-- turnover used
-- unallocated cash
-- a short explanation payload
+```
+solve_bucket_weights → translate_bucket_targets_to_holdings → construct_trades
+→ gate_trades (friction) → risk_gate_trades → rebuild executable state
+```
 
-The top layer is authoritative. Sleeves cannot silently force upstream relaxation of portfolio-wide scenario floors, pacing limits, or budget rules. If a sleeve cannot satisfy its local envelope, it returns a named degraded fallback such as `feasible-conservative`, `hold-current`, or `cash-remainder`.
+It returns an `LPRecommendationResult` containing the `AllocationRunRecord` ready to persist, the trades payload for display and audit, and the executable portfolio state after all gates. The top layer is authoritative — no step can silently relax portfolio-wide scenario floors, turnover limits, or budget rules.
 
 ### Post-Solve Trade Construction
 
 Trade construction occurs after the LP solve:
 
 1. solve continuous target weights
-2. translate to sleeve-level holdings targets
+2. translate to holdings targets
 3. build trades against current holdings
 4. round gilt trades to the nearest GBP100 nominal
 5. leave residual cash in MMF or cash
@@ -206,7 +199,7 @@ The executable recommendation is therefore authoritative for the headline recomm
 
 The risk gate is a named final veto layer between post-solve trade construction and the headline executable recommendation. It exists to separate attractive trades from acceptable trades. The optimiser may identify a direction that improves the objective, and the friction gate may show that it is cheap enough to execute, but the final recommendation still fails if hard portfolio guardrails are breached.
 
-Typical risk-gate checks include post-trade concentration jumps, scenario-loss ceilings, liquidity floors, maturity-policy breaches, and other hard policy rules that should never be silently relaxed. The risk gate can block or downgrade trades, but it cannot force hidden constraint relaxation upstream. Every blocked or downgraded trade must retain a plain-English reason so the user can see why an idea was rejected.
+Risk-gate checks are post-trade concentration, liquidity floor, and maturity-policy breaches. Scenario-loss protection is handled as hard LP floor constraints earlier in the pipeline rather than as a separate risk-gate veto. The risk gate can block or downgrade trades, but it cannot force hidden constraint relaxation upstream. Every blocked or downgraded trade must retain a plain-English reason so the user can see why an idea was rejected.
 
 ### Scenario Engine
 
@@ -230,7 +223,7 @@ Every scenario summary must disclose how much of the portfolio is exact-modelled
 
 ### Audit and Replay
 
-Every solve writes a replayable snapshot to `allocation_runs`. The stored payload includes policy version, baseline allocation, current holdings, sleeve confidence values, cash-flow inputs, active constraints, score coefficients, scenario floors and results, solver status, binding constraints or marginals where available, fallback paths, and sleeve explanation payloads. Auditability is a first-class requirement.
+Every solve writes a replayable snapshot to `allocation_runs`. The stored payload includes policy version, baseline allocation, current holdings, active constraints, score coefficients, scenario floors and results, solver status, binding constraints and marginals, fallback paths, and explanation payloads. Auditability is a first-class requirement.
 
 ### Explanation and Research Layer
 
@@ -240,14 +233,15 @@ Its inputs are existing persisted artefacts such as `allocation_runs`, `signal_r
 
 ## Signal Layer
 
-The signal layer provides four high-level user-visible signal areas:
+The signal layer provides five user-visible signal cards:
 
 1. GRY ranking and switch opportunity
-2. Equity macro valuation versus gilts
-3. Yield-curve shape
-4. Duration and liquidity alerts
+2. Equity macro valuation versus gilts (ERP)
+3. Equity opportunity composite score
+4. Yield-curve shape
+5. Duration and liquidity alerts
 
-The dashboard is organised into four signal cards or areas, while the persisted alert catalogue may contain multiple underlying alert episodes within a single area, especially for the duration and liquidity area, which groups two distinct alerts in one UI area.
+The persisted alert catalogue may contain multiple underlying alert episodes within a single card area, especially for the duration and liquidity area which groups two distinct alerts in one UI area.
 
 ### GRY Ranking and Switch Signal
 
@@ -283,11 +277,33 @@ The banner fires when ERP falls below a configurable threshold (default 0%). The
 
 **Freshness:**
 
-There is no fund-provided `as-of` date in the Yahoo Finance response. Freshness is tracked by fetch date. A cached value may be reused for up to five trading days with a degraded-state warning. Beyond that, the equity macro banner is suppressed and the card remains visible with a stale or unavailable explanation.
+There is no fund-provided `as-of` date in the Yahoo Finance response. Freshness is tracked by fetch date. A cached value may be reused for up to five trading days. Beyond five trading days the card shows a stale-data warning with the last known ERP values rather than suppressing the card.
 
 **Explainability:**
 
-When the signal state changes, the card surfaces which factor moved: gilt GRY rising, equity PE expanding or compressing, or both. This keeps the recommendation traceable to observable market conditions rather than opaque scoring.
+When the signal state changes, the card should surface which factor moved: gilt GRY rising, equity PE expanding or compressing, or both. This is a stated requirement that is not yet implemented — the card currently shows current values but does not compare to the previous session.
+
+### Equity Opportunity Signal
+
+The equity opportunity signal produces a composite 0–100 score that answers: how attractive is the current entry point for global equities, taking into account valuation, relative yield, and recent price behaviour?
+
+**Calculation:**
+
+Three components are each scored as a percentile rank over a rolling historical window:
+
+- ERP percentile: where today's equity risk premium sits relative to its own history
+- Valuation percentile: where today's earnings yield (1/PE) sits relative to its own history
+- Drawdown percentile: how close the benchmark is to its 52-week high
+
+The three percentile scores are averaged into a raw composite, then dampened by a trend filter: if the 50-day EMA is below the 200-day EMA (bear trend), the composite is scaled down by a configurable factor (default 0.75). Score bands: 55+ is attractive, 35–55 is modest, below 35 is unattractive.
+
+**Data source:**
+
+ERP and valuation components reuse `equity_valuation_cache` and `gilt_price_cache`. The drawdown and trend components use benchmark price history from `equity_benchmark_prices`, populated by the `yfinance_equities` refresh.
+
+**Interpretation:**
+
+The score is an incremental-buying indicator, not a binary switch. It does not override the ERP signal or the LP allocator — it provides texture for the equity bucket decision.
 
 ### Yield-Curve Shape Signal
 
@@ -453,7 +469,7 @@ The Portfolio tab shows:
 
 ### Signals Tab
 
-The Signals tab presents a `2x2` grid of bordered cards, one for each of the four high-level signal areas. Each card shows signal name, status, plain-English trigger summary, key metrics, and supporting data points. Quiet or blocked signals remain visible and explain why they are quiet. The card layout is a presentation grouping over the persisted alert system rather than a one-row-per-card persistence model.
+The Signals tab presents five stacked signal cards. Each card shows signal name, status, plain-English trigger summary, key metrics, and supporting data points. Quiet or unavailable signals remain visible and explain why they are quiet. The card layout is a presentation grouping over the persisted alert system rather than a one-row-per-card persistence model.
 
 ### Scenarios Tab
 
@@ -511,7 +527,7 @@ The schema follows these rules:
 
 ### Core Tables
 
-The system persists eleven tables:
+The system persists fourteen tables:
 
 1. `portfolio_snapshots`
 2. `signal_readings`
@@ -524,12 +540,17 @@ The system persists eleven tables:
 9. `refresh_log`
 10. `gilt_reference`
 11. `allocation_runs`
+12. `non_gilt_reference`
+13. `strategic_baseline`
+14. `equity_benchmark_prices`
 
 `portfolio_snapshots` stores one row per `(snapshot_date, symbol)`. `signal_readings` stores one row per `(reading_date, signal_name, metric_name)`. `signal_events` stores one row per alert episode, not one row per daily evaluation. `decision_log` is append-only with a required structured `action` and optional `signal_event_id` link plus JSON `instruments_affected`.
 
 `yield_curve_cache` stores both named yield-curve points and the base rate. `gilt_price_cache` stores daily clean price, GRY, modified duration, coupon, maturity, and fetch timestamp for each successfully solved gilt. `equity_valuation_cache` stores the global equity benchmark `trailingPE` and derived `earnings_yield` by fetch date and `source_name`, keyed to the configured benchmark ticker. The equity signal uses this table to avoid refetching on every evaluation and to support the five-day stale fallback. `allocation_runs` stores the replayable optimiser audit payload as JSON-backed solve records with indexed scalar metadata columns for quick lookup.
 
-The only required foreign key in v1 is `decision_log.signal_event_id -> signal_events.id ON DELETE SET NULL`. Historical cache and snapshot tables do not point back to `gilt_reference`.
+`non_gilt_reference` stores asset type and source classification for non-gilt holdings, refreshed via a portfolio-scoped Yahoo Finance enrichment pass (the LSE bulk reference feeds are paid products and not available as free public endpoints). `strategic_baseline` stores user-authored baseline allocations with bucket weights and policy version. `equity_benchmark_prices` stores benchmark index price history used by the equity opportunity signal.
+
+The only required foreign key is `decision_log.signal_event_id -> signal_events.id ON DELETE SET NULL`. Historical cache and snapshot tables do not point back to `gilt_reference`.
 
 No dedicated explanation or attribution table is required in v1. Change reports and human-readable recommendation summaries can be reconstructed on demand from existing persisted state, with optional caching later if needed for performance.
 
@@ -557,8 +578,9 @@ Remote sources are processed independently in this order:
 1. `boe`
 2. `dmo_reference`
 3. `lse_tidm_bridge` when needed by the reference refresh
-4. `lse_gilt_prices`
-5. `yfinance_equities` (includes price batch for portfolio holdings and the benchmark `trailingPE` fetch)
+4. `non_gilt_reference` (portfolio-scoped Yahoo Finance classification pass for non-gilt holdings)
+5. `lse_gilt_prices`
+6. `yfinance_equities` (includes price batch for portfolio holdings, the benchmark `trailingPE` fetch, and benchmark price history for the equity opportunity signal)
 
 Successful source writes and their `refresh_log(status='completed')` row commit atomically. Failed source writes roll back, then persist one standalone `refresh_log(status='failed')` row, and the coordinator continues to later sources. This preserves graceful degradation and same-day retry safety.
 
