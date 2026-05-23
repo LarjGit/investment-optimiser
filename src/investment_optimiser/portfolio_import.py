@@ -499,6 +499,39 @@ def _fetch_non_gilt_reference_by_symbol(
     }
 
 
+def backfill_portfolio_gilt_classifications(connection: sqlite3.Connection) -> int:
+    """Fix any portfolio holdings stuck on asset_type='other' that can now be matched
+    against gilt_reference. Returns the number of rows updated."""
+    cursor = connection.execute(
+        """
+        UPDATE portfolio_snapshots
+        SET
+            asset_type = (
+                SELECT CASE instrument_type
+                    WHEN 'Conventional' THEN 'gilt_conventional'
+                    ELSE 'gilt_index_linked'
+                END
+                FROM gilt_reference
+                WHERE tidm = portfolio_snapshots.symbol
+                  AND tidm IS NOT NULL
+            ),
+            isin = (
+                SELECT isin
+                FROM gilt_reference
+                WHERE tidm = portfolio_snapshots.symbol
+                  AND tidm IS NOT NULL
+            )
+        WHERE asset_type = 'other'
+          AND EXISTS (
+              SELECT 1 FROM gilt_reference
+              WHERE tidm = portfolio_snapshots.symbol
+                AND tidm IS NOT NULL
+          )
+        """
+    )
+    return cursor.rowcount
+
+
 def _weight_pct(market_value_gbp: float, total_market_value_gbp: float) -> float:
     if total_market_value_gbp == 0:
         return 0.0

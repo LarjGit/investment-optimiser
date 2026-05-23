@@ -10,6 +10,7 @@ from typing import Callable, Mapping, Sequence
 from investment_optimiser.db import sqlite_path_from_url
 from investment_optimiser.portfolio_import import (
     PortfolioImportResult,
+    backfill_portfolio_gilt_classifications,
     import_ii_portfolio_snapshot,
 )
 from investment_optimiser.signal_persistence import run_signal_persistence
@@ -90,6 +91,11 @@ class RefreshCoordinator:
             source_warning_messages.extend(signal_warnings)
             if not signal_succeeded:
                 source_failures += 1
+
+            with _connect_writer(database_path) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                backfill_portfolio_gilt_classifications(connection)
+                connection.commit()
         except Exception as exc:
             return RefreshResult(
                 status="failed",

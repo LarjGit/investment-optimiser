@@ -977,7 +977,11 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
     )
 
 
-def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None) -> None:
+def render_gilt_ranking_card(
+    df: pd.DataFrame,
+    warnings: list[str] | None = None,
+    holdings_df: pd.DataFrame | None = None,
+) -> None:
     rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
 
     if "instrument_type" in df.columns:
@@ -1026,22 +1030,53 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
 
     df = df.sort_values("gry_pct", ascending=False, na_position="last").reset_index(drop=True)
 
+    # Mark held gilts by ISIN
+    held_isins: set[str] = set()
+    if holdings_df is not None and not holdings_df.empty and "isin" in holdings_df.columns:
+        gilt_holdings = holdings_df[
+            holdings_df["asset_type"].isin({"gilt_conventional", "gilt_index_linked"})
+        ]
+        held_isins = set(gilt_holdings["isin"].dropna().tolist())
+    df["held"] = df["isin"].isin(held_isins)
+
     best_gry = df["gry_pct"].max()
     lowest_duration = df["modified_duration_years"].min()
     gilt_count = len(df)
+
+    # Switch banner: compare best market GRY to best held GRY
+    if held_isins:
+        held_rows = df[df["held"]]
+        if not held_rows.empty and held_rows["gry_pct"].notna().any():
+            best_held_gry = held_rows["gry_pct"].max()
+            switch_threshold = 0.001  # 10 bps
+            gap = best_gry - best_held_gry
+            if gap > switch_threshold:
+                best_market_gilt = df.iloc[0]["instrument_name"]
+                st.warning(
+                    f"Switch opportunity: **{best_market_gilt}** yields "
+                    f"**{best_gry * 100:.2f}%** vs your best held gilt at "
+                    f"**{best_held_gry * 100:.2f}%** — a gap of **{gap * 100:.2f}%** "
+                    f"({gap * 10000:.0f}bps). See the Scenarios tab to run a full trade recommendation."
+                )
+            else:
+                st.success(
+                    f"Your best held gilt ({best_held_gry * 100:.2f}% GRY) is within "
+                    f"{gap * 10000:.0f}bps of the market's best available gilt. No switch needed."
+                )
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Best GRY", f"{best_gry * 100:.2f}%")
     col2.metric("Lowest Duration", f"{lowest_duration:.2f} yrs" if pd.notna(lowest_duration) else "—")
     col3.metric("Gilts in Snapshot", str(gilt_count))
 
-    display_cols = ["isin", "instrument_name", "maturity_date", "coupon_pct", "clean_price_gbp", "gry_pct", "modified_duration_years"]
+    display_cols = ["held", "isin", "instrument_name", "maturity_date", "coupon_pct", "clean_price_gbp", "gry_pct", "modified_duration_years"]
     display_df = df[[c for c in display_cols if c in df.columns]].assign(gry_pct=df["gry_pct"] * 100)
     st.dataframe(
         display_df,
         width="stretch",
         hide_index=True,
         column_config={
+            "held": st.column_config.CheckboxColumn("Held", help="You currently hold this gilt"),
             "isin": st.column_config.TextColumn("ISIN"),
             "instrument_name": st.column_config.TextColumn("Name"),
             "maturity_date": st.column_config.TextColumn("Maturity"),
@@ -1067,7 +1102,7 @@ def render_gilt_ranking_card(df: pd.DataFrame, warnings: list[str] | None = None
             f"{il_count} index-linked gilt(s) are excluded from this ranking because no RPI assumption "
             "is set. Set an RPI assumption in the sidebar to include them in yield comparison and optimisation."
         )
-    st.caption("Ranked by GRY descending. IL gilts use nominal-equivalent GRY at the assumed RPI.")
+    st.caption("Ranked by GRY descending. IL gilts use nominal-equivalent GRY at the assumed RPI. Held = currently in your portfolio.")
 
 
 def render_equity_macro_signal_card(
@@ -1323,6 +1358,7 @@ def render_signals_tab(state: dict[str, Any], database_url: str) -> None:
     render_gilt_ranking_card(
         state["gilt_ranking"],
         warnings=state.get("gilt_candidate_warnings"),
+        holdings_df=state.get("holdings"),
     )
     st.divider()
     erp_threshold_pct = float(st.session_state.get(ERP_THRESHOLD_KEY, 0.0))

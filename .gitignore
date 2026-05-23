@@ -8,3 +8,6 @@ data/*.sqlite
 data/*.sqlite3
 data/portfolio_latest.csv
 test_tmp.db
+investment_optimiser.db
+investment_optimiser.db-shm
+investment_optimiser.db-wal
