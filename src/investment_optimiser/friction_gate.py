@@ -89,6 +89,25 @@ def _classify(
     return "red", f"Break-even {break_even_months:.1f} months — not recommended"
 
 
+def break_even_estimate(
+    position_size_gbp: float,
+    yield_gap_pct: float,
+    commission_gbp: float,
+    spread_bps: float,
+    hold_period_years: float,
+) -> tuple[float | None, str]:
+    """Return (break_even_months, outcome) for a prospective gilt switch signal.
+
+    Intended for the signal-layer banner, not the full trade pipeline.
+    Uses the same underlying helpers as gate_trades so thresholds stay consistent.
+    """
+    total_friction = 2.0 * commission_gbp + (spread_bps / 10_000.0) * position_size_gbp
+    yield_improvement_bps = yield_gap_pct * 10_000.0
+    months = _break_even_months(total_friction, yield_improvement_bps, position_size_gbp)
+    outcome, _ = _classify(months, hold_period_years)
+    return months, outcome
+
+
 def gate_trades(
     trades: list[Trade],
     yield_improvement_bps_by_isin: dict[str, float | None],

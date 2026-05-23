@@ -5,6 +5,7 @@ import pandas as pd
 from investment_optimiser.friction_gate import (
     GatedTrade,
     apply_gate_to_proposed_state,
+    break_even_estimate,
     derive_friction_class,
     gate_trades,
 )
@@ -316,3 +317,80 @@ def test_red_buy_creates_liquidity_reserve_when_absent():
     liq_rows = result[result["bucket_id"] == "liquidity_reserve"]
     assert len(liq_rows) == 1
     assert abs(liq_rows.iloc[0]["proposed_value_gbp"] - 3_000.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Cycle 13: break_even_estimate — standalone signal-layer helper
+# ---------------------------------------------------------------------------
+
+def test_break_even_estimate_green():
+    # position £10k, 77 bps gap, £3.99 commission, 5 bps spread, 2y hold
+    # total_friction = 2*3.99 + (5/10000)*10000 = 7.98 + 5.0 = 12.98
+    # annual_gain = 0.0077 * 10000 = 77.0
+    # break_even = (12.98/77) * 12 ≈ 2.02 months → green
+    months, outcome = break_even_estimate(
+        position_size_gbp=10_000.0,
+        yield_gap_pct=0.0077,
+        commission_gbp=3.99,
+        spread_bps=5.0,
+        hold_period_years=2.0,
+    )
+    assert months is not None
+    assert abs(months - 2.02) < 0.1
+    assert outcome == "green"
+
+
+def test_break_even_estimate_amber():
+    # position £10k, 8 bps gap, £3.99 commission, 5 bps spread, 2y hold
+    # total_friction = 12.98, annual_gain = 8.0
+    # break_even = (12.98/8) * 12 ≈ 19.47 months → amber (12–24)
+    months, outcome = break_even_estimate(
+        position_size_gbp=10_000.0,
+        yield_gap_pct=0.0008,
+        commission_gbp=3.99,
+        spread_bps=5.0,
+        hold_period_years=2.0,
+    )
+    assert months is not None
+    assert 12.0 < months < 24.0
+    assert outcome == "amber"
+
+
+def test_break_even_estimate_red():
+    # position £10k, 5 bps gap, £3.99 commission, 5 bps spread, 2y hold
+    # total_friction = 12.98, annual_gain = 5.0
+    # break_even = (12.98/5) * 12 ≈ 31.15 months → red (> 24)
+    months, outcome = break_even_estimate(
+        position_size_gbp=10_000.0,
+        yield_gap_pct=0.0005,
+        commission_gbp=3.99,
+        spread_bps=5.0,
+        hold_period_years=2.0,
+    )
+    assert months is not None
+    assert months > 24.0
+    assert outcome == "red"
+
+
+def test_break_even_estimate_zero_gap():
+    months, outcome = break_even_estimate(
+        position_size_gbp=10_000.0,
+        yield_gap_pct=0.0,
+        commission_gbp=3.99,
+        spread_bps=5.0,
+        hold_period_years=2.0,
+    )
+    assert months is None
+    assert outcome == "red"
+
+
+def test_break_even_estimate_negative_gap():
+    months, outcome = break_even_estimate(
+        position_size_gbp=10_000.0,
+        yield_gap_pct=-0.01,
+        commission_gbp=3.99,
+        spread_bps=5.0,
+        hold_period_years=2.0,
+    )
+    assert months is None
+    assert outcome == "red"
