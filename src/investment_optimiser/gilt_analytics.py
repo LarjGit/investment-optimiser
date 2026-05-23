@@ -352,17 +352,26 @@ def gilt_analytics_handler(
             (cache_date,),
         ).fetchall()
 
+        held_isins: set[str] = {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT isin FROM portfolio_snapshots "
+                "WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM portfolio_snapshots)"
+            ).fetchall()
+        }
+
         il_updates: list[tuple[float, float, str, str]] = []
         for isin, clean_price, coupon_pct, maturity_date_str in il_rows:
             maturity = date.fromisoformat(maturity_date_str)
             years_to_maturity = (maturity - date.today()).days / 365.25
             undiscounted_real_sum = coupon_pct * max(0.0, years_to_maturity) + 100.0
             if clean_price > undiscounted_real_sum * 1.5:
-                warnings.append(
-                    f"{isin} IL gilt price {clean_price:.1f} is {clean_price / undiscounted_real_sum:.1f}× "
-                    "the real cash-flow sum — this appears to be a nominal (index-uplifted) price. "
-                    "Real GRY cannot be computed without the RPI index ratio."
-                )
+                if isin in held_isins:
+                    warnings.append(
+                        f"{isin} IL gilt price {clean_price:.1f} is {clean_price / undiscounted_real_sum:.1f}× "
+                        "the real cash-flow sum — this appears to be a nominal (index-uplifted) price. "
+                        "Real GRY cannot be computed without the RPI index ratio."
+                    )
                 continue
             result = compute_real_gry(clean_price, coupon_pct, maturity, settlement, rpi_assumption_pct)
             if result == (None, None):
