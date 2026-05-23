@@ -474,6 +474,27 @@ def add_il_gilt_gry_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def create_equity_benchmark_prices_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS equity_benchmark_prices (
+            price_date   TEXT NOT NULL,
+            ticker       TEXT NOT NULL,
+            close_price  REAL NOT NULL,
+            volume       INTEGER,
+            fetched_at   TEXT NOT NULL,
+            PRIMARY KEY (price_date, ticker)
+        ) STRICT, WITHOUT ROWID
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_equity_benchmark_prices_ticker_date
+        ON equity_benchmark_prices(ticker, price_date DESC)
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -484,4 +505,5 @@ MIGRATIONS: list[Migration] = [
     create_strategic_baseline_table,
     add_portfolio_snapshot_maturity_date,
     add_il_gilt_gry_columns,
+    create_equity_benchmark_prices_table,
 ]

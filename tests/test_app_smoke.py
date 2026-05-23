@@ -42,7 +42,7 @@ def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert user_version == 9
+    assert user_version == 10
     assert journal_mode.lower() == "wal"
     assert {
         "portfolio_snapshots",
@@ -53,6 +53,7 @@ def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
         "gilt_price_cache",
         "equity_price_cache",
         "equity_valuation_cache",
+        "equity_benchmark_prices",
         "refresh_log",
         "gilt_reference",
         "non_gilt_reference",
