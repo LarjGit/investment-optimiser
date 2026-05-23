@@ -26,10 +26,12 @@ from investment_optimiser.portfolio_import import (
 )
 from investment_optimiser.equity_signals import (
     DurationLiquiditySignal,
+    EquityOpportunitySignal,
     ErpSignal,
     YieldCurveSignal,
     classify_curve_state,
     evaluate_duration_liquidity_signal,
+    evaluate_equity_opportunity_signal,
     evaluate_erp_signal,
     evaluate_yield_curve_shape_signal,
 )
@@ -1223,6 +1225,76 @@ def render_duration_liquidity_signal_card(
         st.info(signal.explanation)
 
 
+def render_equity_opportunity_signal_card(conn: sqlite3.Connection, benchmark_ticker: str) -> None:
+    st.subheader("Global Equity Opportunity")
+
+    signal = evaluate_equity_opportunity_signal(conn, benchmark_ticker)
+
+    if signal.state == "unavailable":
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Opportunity score", "—")
+        col2.metric("Components", "0 / 3")
+        col3.metric("Trend", "—")
+        st.error(signal.explanation)
+        return
+
+    band_labels = {
+        "highly_attractive": "Highly attractive",
+        "attractive": "Attractive",
+        "modest": "Modest",
+        "neutral": "Neutral",
+    }
+    score_pct = f"{signal.composite_score * 100:.0f} / 100"
+    band_label = band_labels[signal.state]
+    trend_str = (
+        f"Dampened ({signal.trend_dampener:.0%})" if signal.trend_dampener is not None and signal.trend_dampener < 1.0
+        else "Undampened"
+    )
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Opportunity score", score_pct, delta=band_label, delta_color="off")
+    col2.metric(
+        "Components",
+        f"{signal.components_available} / 3",
+        delta="degraded" if signal.is_degraded else None,
+        delta_color="inverse" if signal.is_degraded else "off",
+    )
+    col3.metric("Trend", trend_str)
+
+    with st.expander("Component detail", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "ERP percentile",
+            f"{signal.erp_component * 100:.0f}th" if signal.erp_component is not None else "—",
+        )
+        c2.metric(
+            "Valuation percentile",
+            f"{signal.valuation_component * 100:.0f}th" if signal.valuation_component is not None else "—",
+        )
+        c3.metric(
+            "Drawdown percentile",
+            f"{signal.drawdown_component * 100:.0f}th" if signal.drawdown_component is not None else "—",
+        )
+
+    if signal.state in ("attractive", "highly_attractive"):
+        st.info(signal.explanation)
+    elif signal.is_degraded:
+        st.warning(signal.explanation)
+    else:
+        st.info(signal.explanation)
+
+    with st.expander("About this signal"):
+        st.write(
+            "Composite score (0–100) ranking current conditions against history across three factors: "
+            "equity risk premium vs gilts, global equity valuation level (earnings yield percentile), "
+            "and market drawdown from 52-week high. "
+            "Scores are expanding percentile ranks — they reflect where conditions sit relative to "
+            "all readings since the app first ran. "
+            "A 50/200-day EMA trend dampener scales the score down to 75% during persistent bear markets. "
+            "The score is informational only and does not change the baseline allocation."
+        )
+
+
 def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
     """Return gilt ranking for LP: conventional always; IL only when RPI set and analytics present."""
     rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
@@ -1246,7 +1318,7 @@ def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([conventional, il], ignore_index=True)
 
 
-def render_signals_tab(state: dict[str, Any]) -> None:
+def render_signals_tab(state: dict[str, Any], database_url: str) -> None:
     st.subheader("Signals")
     render_gilt_ranking_card(
         state["gilt_ranking"],
@@ -1259,6 +1331,13 @@ def render_signals_tab(state: dict[str, Any]) -> None:
         gilt_ranking=state["gilt_ranking"],
         erp_threshold_pct=erp_threshold_pct,
     )
+    st.divider()
+    policy = load_policy_pack()
+    schema_fields = {f["key"]: f["default"] for f in policy["shared_assumption_schema"]["fields"]}
+    benchmark_ticker = str(schema_fields.get("benchmark_ticker", "SWRD.L"))
+    db_path = sqlite_path_from_url(database_url)
+    with sqlite3.connect(str(db_path)) as opp_conn:
+        render_equity_opportunity_signal_card(opp_conn, benchmark_ticker)
     st.divider()
     render_yield_curve_shape_signal_card(
         yield_curve=state.get("yield_curve"),
@@ -2014,7 +2093,7 @@ def main() -> None:
     with portfolio_tab:
         render_portfolio_tab(state)
     with signals_tab:
-        render_signals_tab(state)
+        render_signals_tab(state, database_url)
     with scenarios_tab:
         render_scenarios_tab(state, database_url)
     with decision_log_tab:
