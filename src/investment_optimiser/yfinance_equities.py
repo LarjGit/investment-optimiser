@@ -110,6 +110,9 @@ def yfinance_equities_handler(connection: sqlite3.Connection) -> list[str]:
             "equity_valuation_cache not updated."
         )
 
+    benchmark_warnings = fetch_and_persist_benchmark_prices(connection, benchmark_ticker, fetched_at)
+    warning_messages.extend(benchmark_warnings)
+
     return warning_messages
 
 
@@ -292,6 +295,55 @@ def _benchmark_ticker_from_policy() -> str:
     fields = load_policy_pack().get("shared_assumption_schema", {}).get("fields", [])
     match = next((f for f in fields if f.get("key") == "benchmark_ticker"), None)
     return str(match["default"]) if match else _DEFAULT_BENCHMARK_TICKER
+
+
+def fetch_and_persist_benchmark_prices(
+    connection: sqlite3.Connection,
+    ticker: str,
+    fetched_at: str,
+) -> list[str]:
+    try:
+        import yfinance as yf
+
+        df = yf.Ticker(ticker).history(
+            period="2y",
+            interval="1d",
+            auto_adjust=True,
+            repair=True,
+        )
+    except Exception as exc:
+        return [f"{ticker} benchmark price history fetch failed: {exc}"]
+
+    if df.empty or "Close" not in df.columns:
+        return [f"{ticker} benchmark price history returned no data."]
+
+    df = df[df["Volume"] > 0].dropna(subset=["Close"])
+    if df.empty:
+        return [f"{ticker} benchmark price history has no valid rows after filtering."]
+
+    rows = [
+        (
+            pd.Timestamp(idx).tz_localize(None).date().isoformat(),
+            ticker,
+            float(row["Close"]),
+            _coerce_int(row.get("Volume")),
+            fetched_at,
+        )
+        for idx, row in df.iterrows()
+    ]
+
+    connection.executemany(
+        """
+        INSERT INTO equity_benchmark_prices (price_date, ticker, close_price, volume, fetched_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(price_date, ticker) DO UPDATE SET
+            close_price = excluded.close_price,
+            volume = excluded.volume,
+            fetched_at = excluded.fetched_at
+        """,
+        rows,
+    )
+    return []
 
 
 def _fetch_benchmark_pe(ticker: str) -> float | None:
