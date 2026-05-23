@@ -59,6 +59,8 @@ from investment_optimiser.blocked_trade_display import (
     RISK_OUTCOME_LABELS,
     RISK_PASS_OUTCOMES,
 )
+from investment_optimiser.friction_gate import break_even_estimate
+from investment_optimiser.gilt_signals import assign_bracket
 from investment_optimiser.narrative_explanation import build_narrative_components
 from investment_optimiser.portfolio_kpis import build_portfolio_kpis
 from investment_optimiser.refresh import REFRESH_SOURCE_ORDER, RefreshCoordinator
@@ -265,7 +267,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             p.gry_pct,
             p.real_gry_pct,
             p.nominal_equivalent_gry_pct,
-            p.modified_duration_years
+            p.modified_duration_years,
+            r.maturity_bracket
         FROM gilt_price_cache p
         JOIN gilt_reference r ON r.isin = p.isin
         WHERE p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
@@ -977,10 +980,121 @@ def render_portfolio_tab(state: dict[str, Any]) -> None:
     )
 
 
+_BRACKET_LABELS = {"short": "Short (<5y)", "medium": "Medium (5–15y)", "long": "Long (>15y)"}
+_SWITCH_THRESHOLD = 0.001  # 10 bps minimum gap to flag
+
+
+def _render_switch_banner(
+    df: pd.DataFrame,
+    held_isins: set[str],
+    holdings_df: pd.DataFrame | None,
+    policy: dict | None,
+) -> None:
+    if not held_isins or df.empty:
+        return
+
+    fields = {}
+    if policy:
+        fields = {f["key"]: f["default"] for f in policy["shared_assumption_schema"]["fields"]}
+    commission = float(fields.get("interactive_investor_trade_fee_gbp", 3.99))
+    hold_period = float(fields.get("expected_hold_period_years", 2.0))
+    spread_by_class = fields.get("spread_bps_by_friction_class", {})
+    conv_spread = float(spread_by_class.get("conventional_gilts", 5.0))
+
+    # Build a held-value lookup: isin → market_value_gbp
+    held_values: dict[str, float] = {}
+    if holdings_df is not None and not holdings_df.empty and "isin" in holdings_df.columns:
+        mv_col = next((c for c in ("market_value_gbp", "refreshed_market_value_gbp") if c in holdings_df.columns), None)
+        if mv_col:
+            for _, row in holdings_df[holdings_df["isin"].isin(held_isins)].iterrows():
+                held_values[row["isin"]] = float(row[mv_col] or 0.0)
+
+    # Assign brackets to all gilts using maturity_bracket from DMO where available
+    dmo_col = "maturity_bracket" if "maturity_bracket" in df.columns else None
+    df = df.copy()
+    df["_bracket"] = [
+        assign_bracket(
+            row["maturity_date"],
+            dmo_bracket=row[dmo_col] if dmo_col else None,
+        )
+        for _, row in df.iterrows()
+    ]
+
+    held_conv = df[df["held"] & df["_bracket"].notna() & df["gry_pct"].notna()]
+
+    opportunities: list[tuple[str, str, str, float, float, float | None, str]] = []
+    already_optimal: list[str] = []
+
+    for bracket in ("short", "medium", "long"):
+        held_in_bracket = held_conv[held_conv["_bracket"] == bracket]
+        if held_in_bracket.empty:
+            continue
+
+        market_in_bracket = df[(df["_bracket"] == bracket) & df["gry_pct"].notna()]
+        if market_in_bracket.empty:
+            continue
+
+        best_held_row = held_in_bracket.loc[held_in_bracket["gry_pct"].idxmax()]
+        best_market_row = market_in_bracket.loc[market_in_bracket["gry_pct"].idxmax()]
+
+        if best_market_row["isin"] == best_held_row["isin"]:
+            already_optimal.append(_BRACKET_LABELS[bracket])
+            continue
+
+        gap = float(best_market_row["gry_pct"]) - float(best_held_row["gry_pct"])
+        if gap <= _SWITCH_THRESHOLD:
+            already_optimal.append(_BRACKET_LABELS[bracket])
+            continue
+
+        position_size = sum(
+            held_values.get(isin, 0.0) for isin in held_in_bracket["isin"]
+        ) or 5_000.0
+
+        months, outcome = break_even_estimate(
+            position_size_gbp=position_size,
+            yield_gap_pct=gap,
+            commission_gbp=commission,
+            spread_bps=conv_spread,
+            hold_period_years=hold_period,
+        )
+        opportunities.append((
+            bracket,
+            str(best_held_row["instrument_name"]),
+            str(best_market_row["instrument_name"]),
+            float(best_held_row["gry_pct"]),
+            float(best_market_row["gry_pct"]),
+            months,
+            outcome,
+        ))
+
+    for bracket, held_name, market_name, held_gry, market_gry, months, outcome in opportunities:
+        gap_bps = (market_gry - held_gry) * 10_000
+        be_str = f"{months:.1f} months" if months is not None else "n/a"
+        msg = (
+            f"**{_BRACKET_LABELS[bracket]} switch:** {market_name} yields "
+            f"**{market_gry * 100:.2f}%** vs held {held_name} at **{held_gry * 100:.2f}%** "
+            f"— gap **{gap_bps:.0f} bps**, break-even **{be_str}**. "
+            f"See the Scenarios tab for a full recommendation."
+        )
+        if outcome == "green":
+            st.success(msg)
+        elif outcome == "red":
+            st.error(msg)
+        else:
+            st.warning(msg)
+
+    if not opportunities and already_optimal:
+        st.success(
+            f"Gilt portfolio looks optimal within each bracket "
+            f"({', '.join(already_optimal)}). No bracket-matched switch needed."
+        )
+
+
 def render_gilt_ranking_card(
     df: pd.DataFrame,
     warnings: list[str] | None = None,
     holdings_df: pd.DataFrame | None = None,
+    policy: dict | None = None,
 ) -> None:
     rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
 
@@ -1043,26 +1157,7 @@ def render_gilt_ranking_card(
     lowest_duration = df["modified_duration_years"].min()
     gilt_count = len(df)
 
-    # Switch banner: compare best market GRY to best held GRY
-    if held_isins:
-        held_rows = df[df["held"]]
-        if not held_rows.empty and held_rows["gry_pct"].notna().any():
-            best_held_gry = held_rows["gry_pct"].max()
-            switch_threshold = 0.001  # 10 bps
-            gap = best_gry - best_held_gry
-            if gap > switch_threshold:
-                best_market_gilt = df.iloc[0]["instrument_name"]
-                st.warning(
-                    f"Switch opportunity: **{best_market_gilt}** yields "
-                    f"**{best_gry * 100:.2f}%** vs your best held gilt at "
-                    f"**{best_held_gry * 100:.2f}%** — a gap of **{gap * 100:.2f}%** "
-                    f"({gap * 10000:.0f}bps). See the Scenarios tab to run a full trade recommendation."
-                )
-            else:
-                st.success(
-                    f"Your best held gilt ({best_held_gry * 100:.2f}% GRY) is within "
-                    f"{gap * 10000:.0f}bps of the market's best available gilt. No switch needed."
-                )
+    _render_switch_banner(df, held_isins, holdings_df, policy)
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Best GRY", f"{best_gry * 100:.2f}%")
@@ -1355,10 +1450,12 @@ def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
 
 def render_signals_tab(state: dict[str, Any], database_url: str) -> None:
     st.subheader("Signals")
+    policy = load_policy_pack()
     render_gilt_ranking_card(
         state["gilt_ranking"],
         warnings=state.get("gilt_candidate_warnings"),
         holdings_df=state.get("holdings"),
+        policy=policy,
     )
     st.divider()
     erp_threshold_pct = float(st.session_state.get(ERP_THRESHOLD_KEY, 0.0))
@@ -1368,7 +1465,6 @@ def render_signals_tab(state: dict[str, Any], database_url: str) -> None:
         erp_threshold_pct=erp_threshold_pct,
     )
     st.divider()
-    policy = load_policy_pack()
     schema_fields = {f["key"]: f["default"] for f in policy["shared_assumption_schema"]["fields"]}
     benchmark_ticker = str(schema_fields.get("benchmark_ticker", "SWRD.L"))
     db_path = sqlite_path_from_url(database_url)
