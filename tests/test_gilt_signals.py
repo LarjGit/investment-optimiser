@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from investment_optimiser.db import initialize_database
-from investment_optimiser.gilt_signals import build_gilt_candidate_universe, fetch_gilt_ranking
+from investment_optimiser.gilt_signals import assign_bracket, build_gilt_candidate_universe, fetch_gilt_ranking
 
 
 def _seed_reference(
@@ -270,3 +270,70 @@ def test_build_universe_includes_il_gilt_with_rpi(db: sqlite3.Connection) -> Non
     isins = list(df["isin"])
     assert "GB00B54HL0K3" in isins
     assert "GB00B4RVKJ67" in isins
+
+
+# ---------------------------------------------------------------------------
+# assign_bracket — maturity-bracket classification
+# Reference date: 2026-05-23 (pinned for deterministic tests)
+# ---------------------------------------------------------------------------
+
+_REF = date(2026, 5, 23)
+
+
+def test_assign_bracket_short_by_ttm():
+    # 2030-06-07 ≈ 4.04y from 2026-05-23 → short
+    assert assign_bracket("2030-06-07", reference_date=_REF) == "short"
+
+
+def test_assign_bracket_medium_by_ttm():
+    # 2031-06-07 ≈ 5.04y → medium
+    assert assign_bracket("2031-06-07", reference_date=_REF) == "medium"
+
+
+def test_assign_bracket_long_by_ttm():
+    # 2041-06-07 ≈ 15.04y → long
+    assert assign_bracket("2041-06-07", reference_date=_REF) == "long"
+
+
+def test_assign_bracket_just_over_5y():
+    # 2031-06-07 = 5.04y from 2026-05-23 → medium (≥ 5y)
+    assert assign_bracket("2031-06-07", reference_date=_REF) == "medium"
+
+
+def test_assign_bracket_just_over_15y():
+    # 2041-06-07 = 15.04y from 2026-05-23 → long (≥ 15y)
+    assert assign_bracket("2041-06-07", reference_date=_REF) == "long"
+
+
+def test_assign_bracket_dmo_short_title_case():
+    assert assign_bracket("2031-06-07", dmo_bracket="Short", reference_date=_REF) == "short"
+
+
+def test_assign_bracket_dmo_medium_title_case():
+    assert assign_bracket("2031-06-07", dmo_bracket="Medium", reference_date=_REF) == "medium"
+
+
+def test_assign_bracket_dmo_long_title_case():
+    assert assign_bracket("2031-06-07", dmo_bracket="Long", reference_date=_REF) == "long"
+
+
+def test_assign_bracket_dmo_lowercase():
+    assert assign_bracket("2031-06-07", dmo_bracket="short", reference_date=_REF) == "short"
+
+
+def test_assign_bracket_dmo_unknown_falls_back_to_ttm():
+    # maturity 2041-06-07 → long by TTM; unrecognised dmo_bracket falls back
+    assert assign_bracket("2041-06-07", dmo_bracket="Unknown", reference_date=_REF) == "long"
+
+
+def test_assign_bracket_dmo_empty_falls_back_to_ttm():
+    assert assign_bracket("2030-06-07", dmo_bracket="", reference_date=_REF) == "short"
+
+
+def test_assign_bracket_dmo_none_falls_back_to_ttm():
+    assert assign_bracket("2030-06-07", dmo_bracket=None, reference_date=_REF) == "short"
+
+
+def test_assign_bracket_null_maturity_returns_short():
+    # Conservative fallback — unknown maturity treated as short
+    assert assign_bracket(None, reference_date=_REF) == "short"

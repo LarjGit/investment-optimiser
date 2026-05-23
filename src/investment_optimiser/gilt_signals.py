@@ -6,6 +6,42 @@ import sqlite3
 import pandas as pd
 
 
+_VALID_BRACKETS = frozenset({"short", "medium", "long"})
+
+
+def assign_bracket(
+    maturity_date_str: str | None,
+    dmo_bracket: str | None = None,
+    reference_date: date | None = None,
+) -> str:
+    """Return 'short', 'medium', or 'long' for a gilt.
+
+    Uses dmo_bracket when it maps to a recognised value, otherwise derives from
+    time-to-maturity: short < 5y, medium 5–15y, long ≥ 15y.
+    Falls back to 'short' when maturity_date_str is None.
+    """
+    if dmo_bracket:
+        normalised = dmo_bracket.lower()
+        if normalised in _VALID_BRACKETS:
+            return normalised
+
+    if maturity_date_str is None:
+        return "short"
+
+    ref = reference_date or date.today()
+    try:
+        mat = date.fromisoformat(maturity_date_str)
+    except ValueError:
+        return "short"
+
+    ttm_years = (mat - ref).days / 365.25
+    if ttm_years >= 15.0:
+        return "long"
+    if ttm_years >= 5.0:
+        return "medium"
+    return "short"
+
+
 _RANKING_SQL_CONVENTIONAL = """
     SELECT
         p.isin,
