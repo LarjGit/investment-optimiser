@@ -6,7 +6,8 @@ import sqlite3
 import pandas as pd
 
 
-_VALID_BRACKETS = frozenset({"short", "medium", "long"})
+_VALID_BRACKETS = frozenset({"ultra-short", "short", "medium", "long"})
+_ULTRA_SHORT_ALIASES = frozenset({"ultra-short", "ultra short"})
 
 
 def assign_bracket(
@@ -14,7 +15,7 @@ def assign_bracket(
     dmo_bracket: str | None = None,
     reference_date: date | None = None,
 ) -> str:
-    """Return 'short', 'medium', or 'long' for a gilt.
+    """Return 'ultra-short', 'short', 'medium', or 'long' for a gilt.
 
     Uses dmo_bracket when it maps to a recognised value, otherwise derives from
     time-to-maturity: short < 5y, medium 5–15y, long ≥ 15y.
@@ -22,6 +23,8 @@ def assign_bracket(
     """
     if dmo_bracket:
         normalised = dmo_bracket.lower()
+        if normalised in _ULTRA_SHORT_ALIASES:
+            return "ultra-short"
         if normalised in _VALID_BRACKETS:
             return normalised
 

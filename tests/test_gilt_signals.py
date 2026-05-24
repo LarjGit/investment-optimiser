@@ -321,6 +321,14 @@ def test_assign_bracket_dmo_lowercase():
     assert assign_bracket("2031-06-07", dmo_bracket="short", reference_date=_REF) == "short"
 
 
+def test_assign_bracket_dmo_ultra_short_title_case():
+    assert assign_bracket("2027-01-29", dmo_bracket="Ultra-Short", reference_date=_REF) == "ultra-short"
+
+
+def test_assign_bracket_dmo_ultra_short_space_variant():
+    assert assign_bracket("2027-01-29", dmo_bracket="Ultra Short", reference_date=_REF) == "ultra-short"
+
+
 def test_assign_bracket_dmo_unknown_falls_back_to_ttm():
     # maturity 2041-06-07 → long by TTM; unrecognised dmo_bracket falls back
     assert assign_bracket("2041-06-07", dmo_bracket="Unknown", reference_date=_REF) == "long"
