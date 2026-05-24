@@ -178,12 +178,12 @@ def test_lse_gilt_prices_handler_continues_after_per_instrument_failure(
 
         rows = connection.execute(
             """
-            SELECT isin, clean_price_gbp
+            SELECT isin, clean_price_gbp, bid_price_gbp, offer_price_gbp
             FROM gilt_price_cache
             ORDER BY isin ASC
             """
         ).fetchall()
 
-    assert rows == [("GB00GOOD0001", 100.0)]
+    assert rows == [("GB00GOOD0001", 100.0, 99.5, 100.5)]
     assert len(warning_messages) == 1
     assert "BAD1" in warning_messages[0]

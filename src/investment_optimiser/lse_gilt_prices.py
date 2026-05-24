@@ -14,7 +14,7 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
     cache_date = date.today().isoformat()
     fetched_at = _utc_now()
     warnings: list[str] = []
-    rows_to_upsert: list[tuple[str, str, float, float | None, float | None, float, str, str]] = []
+    rows_to_upsert: list[tuple] = []
 
     for isin, tidm, coupon_pct, maturity_date in connection.execute(
         """
@@ -32,6 +32,9 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
             warnings.append(f"{tidm} ({isin}) price refresh failed: {exc}")
             continue
 
+        bid_price_gbp = _coerce_float(payload.get("bid"))
+        offer_price_gbp = _coerce_float(payload.get("offer"))
+
         rows_to_upsert.append(
             (
                 cache_date,
@@ -42,6 +45,8 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
                 coupon_pct,
                 maturity_date,
                 fetched_at,
+                bid_price_gbp,
+                offer_price_gbp,
             )
         )
 
@@ -58,15 +63,19 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
             modified_duration_years,
             coupon_pct,
             maturity_date,
-            fetched_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            fetched_at,
+            bid_price_gbp,
+            offer_price_gbp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cache_date, isin) DO UPDATE SET
             clean_price_gbp = excluded.clean_price_gbp,
             gry_pct = NULL,
             modified_duration_years = NULL,
             coupon_pct = excluded.coupon_pct,
             maturity_date = excluded.maturity_date,
-            fetched_at = excluded.fetched_at
+            fetched_at = excluded.fetched_at,
+            bid_price_gbp = excluded.bid_price_gbp,
+            offer_price_gbp = excluded.offer_price_gbp
         """,
         rows_to_upsert,
     )

@@ -495,6 +495,15 @@ def create_equity_benchmark_prices_table(connection: sqlite3.Connection) -> None
     )
 
 
+def add_gilt_price_cache_bid_offer_columns(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE gilt_price_cache ADD COLUMN bid_price_gbp REAL"
+    )
+    connection.execute(
+        "ALTER TABLE gilt_price_cache ADD COLUMN offer_price_gbp REAL"
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -506,4 +515,5 @@ MIGRATIONS: list[Migration] = [
     add_portfolio_snapshot_maturity_date,
     add_il_gilt_gry_columns,
     create_equity_benchmark_prices_table,
+    add_gilt_price_cache_bid_offer_columns,
 ]
