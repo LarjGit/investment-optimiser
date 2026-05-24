@@ -21,18 +21,21 @@ def _make_ranking_df(rows: list[dict]) -> pd.DataFrame:
         "gry_pct": 0.045,
         "held": False,
         "maturity_bracket": None,
+        "bid_price_gbp": 99.5,
+        "offer_price_gbp": 100.5,
+        "clean_price_gbp": 100.0,
     }
     return pd.DataFrame([{**defaults, **r} for r in rows])
 
 
 def test_returns_empty_when_no_held_isins():
     df = _make_ranking_df([{"isin": "GB0001", "gry_pct": 0.045, "held": False}])
-    rows = app._build_switch_rows(df, set(), {}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, set(), {}, 3.99, 2.0)
     assert rows == []
 
 
 def test_returns_empty_when_df_is_empty():
-    rows = app._build_switch_rows(pd.DataFrame(), {"GB0001"}, {}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(pd.DataFrame(), {"GB0001"}, {}, 3.99, 2.0)
     assert rows == []
 
 
@@ -40,7 +43,7 @@ def test_il_gilt_excluded_from_rows():
     df = _make_ranking_df([
         {"isin": "GB0001", "instrument_type": "Index-linked", "gry_pct": 0.045, "held": True},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {}, 3.99, 2.0)
     assert rows == []
 
 
@@ -48,7 +51,7 @@ def test_already_best_when_no_other_gilts_in_bracket():
     df = _make_ranking_df([
         {"isin": "GB0001", "gry_pct": 0.045, "held": True},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 2.0)
     assert len(rows) == 1
     row = rows[0]
     assert row["Best Available (same bracket)"] == "— already best in bracket —"
@@ -63,7 +66,7 @@ def test_already_best_when_gap_at_threshold():
         {"isin": "GB0001", "gry_pct": 0.045, "held": True},
         {"isin": "GB0002", "gry_pct": 0.04550, "held": False},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 2.0)
     assert len(rows) == 1
     assert rows[0]["Signal"] == "✓"
     assert rows[0]["Gap (bps)"] is None
@@ -74,7 +77,7 @@ def test_switch_opportunity_above_threshold():
         {"isin": "GB0001", "instrument_name": "Held Gilt", "gry_pct": 0.045, "held": True},
         {"isin": "GB0002", "instrument_name": "Market Gilt", "gry_pct": 0.050, "held": False},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 10000.0}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 10000.0}, 3.99, 2.0)
     assert len(rows) == 1
     row = rows[0]
     assert row["Held Gilt"] == "Held Gilt"
@@ -90,7 +93,7 @@ def test_position_in_row():
         {"isin": "GB0001", "gry_pct": 0.045, "held": True},
         {"isin": "GB0002", "gry_pct": 0.050, "held": False},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 12500.0}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 12500.0}, 3.99, 2.0)
     assert rows[0]["Position"] == 12500.0
 
 
@@ -99,7 +102,7 @@ def test_position_none_when_no_held_values():
         {"isin": "GB0001", "gry_pct": 0.045, "held": True},
         {"isin": "GB0002", "gry_pct": 0.050, "held": False},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {}, 3.99, 2.0)
     assert rows[0]["Position"] is None
 
 
@@ -111,7 +114,7 @@ def test_multiple_held_gilts_in_different_brackets():
         {"isin": "GB0004", "instrument_name": "Medium Market", "maturity_date": "2034-06-01", "gry_pct": 0.047, "held": False},
     ])
     rows = app._build_switch_rows(
-        df, {"GB0001", "GB0002"}, {"GB0001": 8000.0, "GB0002": 12000.0}, 3.99, 5.0, 2.0
+        df, {"GB0001", "GB0002"}, {"GB0001": 8000.0, "GB0002": 12000.0}, 3.99, 2.0
     )
     assert len(rows) == 2
     held_names = {r["Held Gilt"] for r in rows}
@@ -125,7 +128,29 @@ def test_held_gilt_not_considered_as_its_own_best_alternative():
         {"isin": "GB0001", "instrument_name": "Held Gilt", "gry_pct": 0.050, "held": True},
         {"isin": "GB0002", "instrument_name": "Market Gilt", "gry_pct": 0.045, "held": False},
     ])
-    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 5.0, 2.0)
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 8000.0}, 3.99, 2.0)
     assert len(rows) == 1
     # Market gilt has LOWER yield — held gilt is already best
     assert rows[0]["Signal"] == "✓"
+
+
+def test_spread_calculated_from_bid_offer():
+    df = _make_ranking_df([
+        {
+            "isin": "GB0001", "instrument_name": "Held Gilt", "gry_pct": 0.045, "held": True,
+            "bid_price_gbp": 99.0, "offer_price_gbp": 101.0, "clean_price_gbp": 100.0,
+        },
+        {"isin": "GB0002", "instrument_name": "Market Gilt", "gry_pct": 0.050, "held": False},
+    ])
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 10000.0}, 3.99, 2.0)
+    assert len(rows) == 1
+    assert abs(rows[0]["Spread (bps)"] - 200.0) < 0.1  # (101-99)/100 * 10000
+
+
+def test_held_gilt_skipped_when_no_bid_offer():
+    df = _make_ranking_df([
+        {"isin": "GB0001", "gry_pct": 0.045, "held": True, "bid_price_gbp": None, "offer_price_gbp": None},
+        {"isin": "GB0002", "gry_pct": 0.050, "held": False},
+    ])
+    rows = app._build_switch_rows(df, {"GB0001"}, {"GB0001": 10000.0}, 3.99, 2.0)
+    assert rows == []

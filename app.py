@@ -268,7 +268,9 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             p.real_gry_pct,
             p.nominal_equivalent_gry_pct,
             p.modified_duration_years,
-            r.maturity_bracket
+            r.maturity_bracket,
+            p.bid_price_gbp,
+            p.offer_price_gbp
         FROM gilt_price_cache p
         JOIN gilt_reference r ON r.isin = p.isin
         WHERE p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
@@ -989,7 +991,6 @@ def _build_switch_rows(
     held_isins: set[str],
     held_values: dict[str, float],
     commission: float,
-    conv_spread: float,
     hold_period: float,
 ) -> list[dict]:
     """Return one row dict per held conventional gilt for the switch opportunity table."""
@@ -1025,6 +1026,13 @@ def _build_switch_rows(
         position_display = held_values.get(held_isin)
         position_compute = held_values.get(held_isin) or 5_000.0
 
+        bid = held_row.get("bid_price_gbp")
+        offer = held_row.get("offer_price_gbp")
+        clean = float(held_row.get("clean_price_gbp") or 0.0)
+        if not (pd.notna(bid) and pd.notna(offer) and clean > 0):
+            continue
+        spread_bps = (float(offer) - float(bid)) / clean * 10_000
+
         candidates = df[
             (df["_bracket"] == bracket) & (~df["held"]) & df["gry_pct"].notna()
         ]
@@ -1051,7 +1059,7 @@ def _build_switch_rows(
                     position_size_gbp=position_compute,
                     yield_gap_pct=gap,
                     commission_gbp=commission,
-                    spread_bps=conv_spread,
+                    spread_bps=spread_bps,
                     hold_period_years=hold_period,
                 )
 
@@ -1063,6 +1071,7 @@ def _build_switch_rows(
             "Gap (bps)": gap_bps,
             "Position": position_display,
             "Break-even (mo)": break_even_months,
+            "Spread (bps)": round(spread_bps, 1),
             "Signal": signal,
         })
 
@@ -1083,8 +1092,6 @@ def _render_gilt_switch_table(
         fields = {f["key"]: f["default"] for f in policy["shared_assumption_schema"]["fields"]}
     commission = float(fields.get("interactive_investor_trade_fee_gbp", 3.99))
     hold_period = float(fields.get("expected_hold_period_years", 2.0))
-    spread_by_class = fields.get("spread_bps_by_friction_class", {})
-    conv_spread = float(spread_by_class.get("conventional_gilts", 5.0))
 
     held_values: dict[str, float] = {}
     if holdings_df is not None and not holdings_df.empty and "isin" in holdings_df.columns:
@@ -1096,7 +1103,7 @@ def _render_gilt_switch_table(
             for _, row in holdings_df[holdings_df["isin"].isin(held_isins)].iterrows():
                 held_values[row["isin"]] = float(row[mv_col] or 0.0)
 
-    rows = _build_switch_rows(df, held_isins, held_values, commission, conv_spread, hold_period)
+    rows = _build_switch_rows(df, held_isins, held_values, commission, hold_period)
     if not rows:
         return
 
@@ -1113,6 +1120,7 @@ def _render_gilt_switch_table(
             "Gap (bps)": st.column_config.NumberColumn("Gap (bps)", format="%.0f"),
             "Position": st.column_config.NumberColumn("Position", format="£%,.0f"),
             "Break-even (mo)": st.column_config.NumberColumn("Break-even (mo)", format="%.1f"),
+            "Spread (bps)": st.column_config.NumberColumn("Spread (bps)", format="%.1f"),
             "Signal": st.column_config.TextColumn("Signal", width="small"),
         },
     )
