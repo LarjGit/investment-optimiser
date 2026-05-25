@@ -131,7 +131,9 @@ def _parse_rows(content: bytes) -> list[tuple]:
 def dmo_handler(connection: sqlite3.Connection) -> None:
     content = _fetch_xml()
     rows = _parse_rows(content)
-    connection.execute("DELETE FROM gilt_reference")
+    new_isins = tuple(row[0] for row in rows)
+
+    # Upsert: preserve tidm (set by the TIDM bridge) when a gilt already exists.
     connection.executemany(
         """
         INSERT INTO gilt_reference (
@@ -139,6 +141,24 @@ def dmo_handler(connection: sqlite3.Connection) -> None:
             dividend_months, dividend_day, ex_div_date,
             instrument_type, maturity_bracket, last_updated
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(isin) DO UPDATE SET
+            instrument_name  = excluded.instrument_name,
+            coupon_pct       = excluded.coupon_pct,
+            maturity_date    = excluded.maturity_date,
+            dividend_months  = excluded.dividend_months,
+            dividend_day     = excluded.dividend_day,
+            ex_div_date      = excluded.ex_div_date,
+            instrument_type  = excluded.instrument_type,
+            maturity_bracket = excluded.maturity_bracket,
+            last_updated     = excluded.last_updated
         """,
         rows,
     )
+
+    # Remove gilts that have matured or been redeemed (no longer in the DMO feed).
+    if new_isins:
+        placeholders = ",".join("?" * len(new_isins))
+        connection.execute(
+            f"DELETE FROM gilt_reference WHERE isin NOT IN ({placeholders})",
+            new_isins,
+        )

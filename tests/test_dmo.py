@@ -199,6 +199,33 @@ def test_dmo_handler_skips_row_with_unparseable_coupon(tmp_path: Path) -> None:
     assert count == 2  # bad-coupon row silently skipped
 
 
+def test_dmo_handler_preserves_tidm_on_second_run(tmp_path: Path) -> None:
+    db_path = _setup_db(tmp_path)
+
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(_TWO_GILT_XML)):
+        with sqlite3.connect(db_path) as conn:
+            dmo_handler(conn)
+
+    # Simulate TIDM bridge having populated the conventional gilt's TIDM.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE gilt_reference SET tidm = 'TG26' WHERE isin = ?",
+            (_CONVENTIONAL_ISIN,),
+        )
+
+    # Second DMO run must not wipe the TIDM.
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(_TWO_GILT_XML)):
+        with sqlite3.connect(db_path) as conn:
+            dmo_handler(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT tidm FROM gilt_reference WHERE isin = ?", (_CONVENTIONAL_ISIN,)
+        ).fetchone()
+
+    assert row[0] == "TG26", "TIDM must survive a dmo_handler re-run"
+
+
 def test_dmo_handler_replaces_all_rows_on_second_run(tmp_path: Path) -> None:
     db_path = _setup_db(tmp_path)
 

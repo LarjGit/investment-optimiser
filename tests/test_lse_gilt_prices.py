@@ -4,6 +4,8 @@ from pathlib import Path
 import sqlite3
 from unittest.mock import patch
 
+import pytest
+
 from investment_optimiser.db import initialize_database
 from investment_optimiser.lse_gilt_prices import lse_gilt_prices_handler
 
@@ -187,3 +189,49 @@ def test_lse_gilt_prices_handler_continues_after_per_instrument_failure(
     assert rows == [("GB00GOOD0001", 100.0, 99.5, 100.5)]
     assert len(warning_messages) == 1
     assert "BAD1" in warning_messages[0]
+
+
+def test_lse_gilt_prices_handler_rejects_partial_snapshot_below_50_pct(
+    tmp_path: Path,
+) -> None:
+    """A partial refresh (e.g. market closed) must not advance MAX(cache_date)."""
+    db_path = tmp_path / "investment_optimiser.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+
+    initialize_database(database_url)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO gilt_reference (
+                isin, tidm, instrument_name, coupon_pct, maturity_date,
+                dividend_months, dividend_day, ex_div_date, instrument_type,
+                maturity_bracket, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("GB00GOOD0001", "TG26", "1.5% Treasury 2026", 1.5, "2026-07-22",
+                 "Jan,Jul", 22, None, "Conventional", "0-5", "2026-05-19T09:00:00Z"),
+                ("GB00BAD00001", "BAD1", "4% Treasury 2030", 4.0, "2030-01-22",
+                 "Jan,Jul", 22, None, "Conventional", "5-10", "2026-05-19T09:00:00Z"),
+                ("GB00BAD00002", "BAD2", "4% Treasury 2031", 4.0, "2031-01-22",
+                 "Jan,Jul", 22, None, "Conventional", "5-10", "2026-05-19T09:00:00Z"),
+            ],
+        )
+
+        def fake_fetch(tidm: str) -> dict[str, object]:
+            if tidm == "TG26":
+                return {"currency": "GBP", "segment": "UKGT", "midPrice": 100.0,
+                        "isin": "GB00GOOD0001"}
+            raise ValueError("no price available")
+
+        with patch(
+            "investment_optimiser.lse_gilt_prices._fetch_instrument_data",
+            side_effect=fake_fetch,
+        ):
+            with pytest.raises(ValueError, match="Previous snapshot retained"):
+                lse_gilt_prices_handler(connection)
+
+        rows = connection.execute("SELECT * FROM gilt_price_cache").fetchall()
+
+    assert rows == [], "partial snapshot must not be committed"

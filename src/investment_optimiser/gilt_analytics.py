@@ -282,11 +282,13 @@ def _derive_benchmark_yields(
                 (date.fromisoformat(r[2]) - today).days / 365.25 - ty
             ),
         )
+        # yield_curve_cache stores rates as percentage (e.g. 4.96 for 4.96%),
+        # consistent with the BoE series; gry_pct is decimal so multiply by 100.
         benchmark_rows.append((
             cache_date,
             curve_key,
             target_years,
-            float(best[1]),
+            float(best[1]) * 100.0,
             "LSE_DERIVED",
             fetched_at,
         ))

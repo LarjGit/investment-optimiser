@@ -227,10 +227,10 @@ def test_gilt_analytics_handler_derives_lse_benchmark_yields(tmp_path: Path) -> 
     assert rows["lse_derived_1y"][1] == "LSE_DERIVED"
     assert rows["lse_derived_2y"][1] == "LSE_DERIVED"
     assert rows["lse_derived_30y"][1] == "LSE_DERIVED"
-    # nearest gilt to 1y has gry=0.042, nearest to 2y has gry=0.040, nearest to 30y has gry=0.045
-    assert rows["lse_derived_1y"][0] == pytest.approx(0.042)
-    assert rows["lse_derived_2y"][0] == pytest.approx(0.040)
-    assert rows["lse_derived_30y"][0] == pytest.approx(0.045)
+    # gry_pct is decimal (0.042 = 4.2%); yield_curve_cache stores as percentage
+    assert rows["lse_derived_1y"][0] == pytest.approx(4.2)
+    assert rows["lse_derived_2y"][0] == pytest.approx(4.0)
+    assert rows["lse_derived_30y"][0] == pytest.approx(4.5)
 
 
 def test_gilt_analytics_handler_skips_benchmark_when_no_gry_rows(tmp_path: Path) -> None:

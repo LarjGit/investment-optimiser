@@ -237,13 +237,21 @@ def evaluate_erp_signal(
     cache_date: str | None,
     erp_threshold_pct: float,
 ) -> ErpSignal:
-    if pe_ratio is None or best_gry is None or cache_date is None:
+    if pe_ratio is None or cache_date is None:
         return ErpSignal(
             state="unavailable",
             erp_pct=None,
             earnings_yield_pct=None,
             best_gilt_gry_pct=None,
             explanation="Equity valuation data is unavailable.",
+        )
+    if best_gry is None:
+        return ErpSignal(
+            state="unavailable",
+            erp_pct=None,
+            earnings_yield_pct=None,
+            best_gilt_gry_pct=None,
+            explanation="No conventional gilt GRY available — run a market data refresh.",
         )
 
     earnings_yield = 1.0 / pe_ratio

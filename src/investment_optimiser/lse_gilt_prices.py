@@ -16,14 +16,17 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
     warnings: list[str] = []
     rows_to_upsert: list[tuple] = []
 
-    for isin, tidm, coupon_pct, maturity_date in connection.execute(
+    gilt_rows = connection.execute(
         """
         SELECT isin, tidm, coupon_pct, maturity_date
         FROM gilt_reference
         WHERE tidm IS NOT NULL
         ORDER BY maturity_date ASC, isin ASC
         """
-    ).fetchall():
+    ).fetchall()
+    total_expected = len(gilt_rows)
+
+    for isin, tidm, coupon_pct, maturity_date in gilt_rows:
         try:
             payload = _fetch_instrument_data(tidm)
             _validate_payload(payload, expected_isin=isin)
@@ -52,6 +55,16 @@ def lse_gilt_prices_handler(connection: sqlite3.Connection) -> list[str]:
 
     if not rows_to_upsert:
         raise ValueError("LSE gilt price refresh produced no usable rows.")
+
+    # Reject partial snapshots (e.g. market closed) to avoid advancing MAX(cache_date)
+    # and hiding the last complete snapshot from the signals tab.
+    success_rate = len(rows_to_upsert) / total_expected if total_expected else 0.0
+    if success_rate < 0.5:
+        raise ValueError(
+            f"LSE gilt price refresh returned prices for only {len(rows_to_upsert)} of "
+            f"{total_expected} gilts ({success_rate:.0%}). "
+            "The market may be closed. Previous snapshot retained."
+        )
 
     connection.executemany(
         """
