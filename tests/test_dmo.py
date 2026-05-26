@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from investment_optimiser.db import initialize_database
-from investment_optimiser.dmo import _parse_coupon, _parse_dividend_dates, dmo_handler
+from investment_optimiser.dmo import _normalize_type, _parse_coupon, _parse_dividend_dates, dmo_handler
 
 
 def _mock_urlopen(xml: str) -> MagicMock:
@@ -74,6 +74,28 @@ def test_parse_dividend_dates_garbled_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _normalize_type
+# ---------------------------------------------------------------------------
+
+def test_normalize_type_accepts_8_month_lag() -> None:
+    assert _normalize_type("Index-linked 8 months") == "Index-linked"
+
+
+def test_normalize_type_accepts_3_month_lag() -> None:
+    # INSTRUMENT_TYPE is not a reliable discriminator — DMO uses "Index-linked 8 months"
+    # for old Treasury Stock gilts too. Exclusion is done via instrument name in _parse_rows.
+    assert _normalize_type("Index-linked 3 months") == "Index-linked"
+
+
+def test_normalize_type_accepts_conventional() -> None:
+    assert _normalize_type("Conventional") == "Conventional"
+
+
+def test_normalize_type_rejects_unknown() -> None:
+    assert _normalize_type("Something else") is None
+
+
+# ---------------------------------------------------------------------------
 # dmo_handler round-trip
 # ---------------------------------------------------------------------------
 
@@ -96,7 +118,7 @@ _TWO_GILT_XML = """\
   <View_GILTS_IN_ISSUE
     ISIN_CODE="GB0004893535"
     INSTRUMENT_NAME="2½% Index-linked Treasury Gilt 2024"
-    INSTRUMENT_TYPE="Index-linked 3 months"
+    INSTRUMENT_TYPE="Index-linked 8 months"
     MATURITY_BRACKET="Short"
     REDEMPTION_DATE="2024-07-17T00:00:00"
     DIVIDEND_DATES="17 Jan/Jul"
@@ -132,7 +154,7 @@ _BAD_COUPON_XML = """\
   <View_GILTS_IN_ISSUE
     ISIN_CODE="GB0004893535"
     INSTRUMENT_NAME="2½% Index-linked Treasury Gilt 2024"
-    INSTRUMENT_TYPE="Index-linked 3 months"
+    INSTRUMENT_TYPE="Index-linked 8 months"
     MATURITY_BRACKET="Short"
     REDEMPTION_DATE="2024-07-17T00:00:00"
     DIVIDEND_DATES="17 Jan/Jul"
@@ -154,6 +176,22 @@ _ONE_GILT_XML = """\
     DIVIDEND_DATES="7 Mar/Sep"
     CURRENT_EX_DIV_DATE="2035-02-26T00:00:00"
     CLOSE_OF_BUSINESS_DATE="2026-05-15T00:00:00"
+  />
+</Data>
+"""
+
+_3MONTH_IL_XML = """\
+<?xml version="1.0" encoding="utf-8"?>
+<Data>
+  <View_GILTS_IN_ISSUE
+    ISIN_CODE="GB0008932666"
+    INSTRUMENT_NAME="4 1/8% Index-linked Treasury Stock 2030"
+    INSTRUMENT_TYPE="Index-linked 8 months"
+    MATURITY_BRACKET="Medium"
+    REDEMPTION_DATE="2030-09-22T00:00:00"
+    DIVIDEND_DATES="22 Mar/Sep"
+    CURRENT_EX_DIV_DATE="2030-09-13T00:00:00"
+    CLOSE_OF_BUSINESS_DATE="2026-05-25T00:00:00"
   />
 </Data>
 """
@@ -256,3 +294,16 @@ def test_dmo_handler_propagates_http_error(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM gilt_reference").fetchone()[0]
     assert count == 0
+
+
+def test_dmo_handler_excludes_3month_il_gilt(tmp_path: Path) -> None:
+    db_path = _setup_db(tmp_path)
+
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(_3MONTH_IL_XML)):
+        with sqlite3.connect(db_path) as conn:
+            dmo_handler(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM gilt_reference").fetchone()[0]
+
+    assert count == 0, "3-month-lag IL gilts must be excluded at DMO parse stage"

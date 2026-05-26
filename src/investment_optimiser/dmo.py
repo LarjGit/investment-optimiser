@@ -96,6 +96,12 @@ def _parse_rows(content: bytes) -> list[tuple]:
         if instrument_type is None:
             continue
 
+        # Old 3-month-lag IL gilts are named "Treasury Stock"; modern 8-month-lag
+        # gilts are "Treasury Gilt". The INSTRUMENT_TYPE field is not a reliable
+        # discriminator — the DMO uses "Index-linked 8 months" for both.
+        if instrument_type == "Index-linked" and "Treasury Stock" in instrument_name:
+            continue
+
         coupon_pct = _parse_coupon(instrument_name)
         if coupon_pct is None:
             continue
