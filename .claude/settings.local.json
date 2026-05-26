@@ -18,7 +18,10 @@
       "Bash(git stash *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(gh api *)",
+      "WebFetch(domain:dmo.gov.uk)"
     ]
   }
 }
