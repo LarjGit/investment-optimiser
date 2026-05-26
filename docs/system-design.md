@@ -128,7 +128,7 @@ The top layer works in portfolio weights:
 - `w_cur`: current live holdings weights
 - `w`: target post-trade weights
 
-The frozen v1 policy pack lives in `src/investment_optimiser/policy_pack_v1.json` and is described in `docs/policy-pack-v1.md`. Later slices should treat that artifact as the source of truth for the bucket taxonomy, named scenarios, default constraints, and shared assumption keys.
+The frozen v1 policy pack lives in `src/investment_optimiser/policy_pack_v1.json` and is described in `docs/policy-pack-v1.md`. Later slices should treat that artifact as the source of truth for the bucket taxonomy, named scenarios, default constraints, and shared assumption keys. The next revision of that artifact should also be the source of truth for split forward-inflation assumptions and other cross-module policy fields that must remain machine-readable and versioned.
 
 Hard policy constraints include full investment, long-only positioning in v1, baseline tilt bands, regime-aware turnover limits, and adverse-scenario acceptability floors. Sleeve-local constraints include maturity caps, concentration caps, MMF or cash floors, and liquidity floors for the fixed-income sleeve.
 
@@ -138,7 +138,9 @@ A confidence mechanism that dynamically tightens tilt bands when signal certaint
 
 ### Solver Design
 
-The v1 top-layer optimiser uses `scipy.optimize.linprog(method='highs')` with a continuous LP core. Presolve remains enabled, and if an unbounded result appears where infeasibility is plausible, the solver is re-run once with `presolve=False` to disambiguate. SLSQP and MILP are intentionally excluded from the v1 core.
+The current top-layer optimiser uses `scipy.optimize.linprog(method='highs')` with a continuous LP core. Presolve remains enabled, and if an unbounded result appears where infeasibility is plausible, the solver is re-run once with `presolve=False` to disambiguate. SLSQP and MILP are intentionally excluded from the v1 core.
+
+The next planned solver step is `cvxpy` with HiGHS as the backend while the problem remains a continuous LP. The motivation is not a different optimisation philosophy; it is better constraint readability, easier evolution as policy rules grow, and clearer infeasibility diagnosis when turnover limits and tilt bands interact. The mathematical shape stays linear unless and until a later slice deliberately introduces a different objective family.
 
 This fits the required problem shape:
 
@@ -158,7 +160,14 @@ Scenario robustness uses explicit hard floors for a small set of adverse scenari
 
 ### Fixed-Income Candidate Universe and GRY Calculation
 
-The fixed-income sleeve searches the full live gilt universe, not just current holdings. Conventional gilts are always in scope. Index-linked gilts join ranking and optimisation only when the user supplies an expected RPI assumption that permits real-to-nominal comparison. MMF yield is proxied by the Bank of England base rate.
+The fixed-income sleeve searches the full live gilt universe, not just current holdings. Conventional gilts are always in scope. MMF yield is proxied by the Bank of England base rate.
+
+Index-linked gilts require two distinct inflation inputs that must not be collapsed into one field:
+
+- observed inflation data used for pricing mechanics and index-ratio reconstruction
+- forward inflation assumptions used for real-to-nominal comparison and decision-making
+
+Observed inflation data comes from authoritative refreshed sources such as DMO D10C and/or ONS CHAW. Forward inflation assumptions remain user-authored policy inputs. This separation is deliberate: realised RPI used to interpret today's quoted price is not the same thing as the investor's forward inflation view.
 
 The shared gilt yield engine uses the LSE price-explorer API as the live price source for both held and candidate gilts, with prices normalised to `per GBP100 nominal`. Interactive Investor CSV prices remain fallback-only for held gilts temporarily missing from the LSE snapshot.
 
@@ -166,7 +175,17 @@ Settlement is `T+1` using England and Wales bank holidays. Coupon schedules are 
 
 `compute_gry(clean_price_per_100, coupon_pct, maturity_date, settlement_date)` returns both annual GRY and modified duration. The primary solve path uses Newton; `brentq` is the fallback. Failed solves are omitted from `gilt_price_cache` and surfaced as warnings rather than persisted as null analytics.
 
-Index-linked gilt real GRY is a separate calculation built in a dedicated slice after the shared GRY engine. The real yield solve uses the same Newton/brentq path but with the redemption cash flow uplifted by the projected index ratio derived from the user-supplied RPI assumption. The nominal-equivalent yield is then computed from the real yield using the Fisher equation. The RPI assumption is a sidebar input that is added to the session state and frozen as a named field in `policy_pack_v1.json` in the same slice. Until that slice is built, IL gilts are priced and held in the portfolio but excluded from yield ranking, switch logic, and the LP candidate universe.
+Index-linked gilt real GRY is a separate calculation built in a dedicated slice after the shared GRY engine. The real yield solve uses the same Newton/brentq path but with the redemption cash flow uplifted by the projected index ratio. That projected ratio is built from two inputs:
+
+- observed RPI or index-ratio data for the already-published part of the uplift path
+- user-authored forward inflation assumptions for the remaining projection horizon
+
+The nominal-equivalent yield is then computed from the real yield using the Fisher equation. Forward inflation assumptions are sidebar inputs added to session state and frozen as named fields in `policy_pack_v1.json`. A single scalar assumption is no longer the intended end-state. The design should support at least:
+
+- `rpi_assumption_pre_2030_pct`
+- `rpi_assumption_post_2030_pct`
+
+The post-2030 split exists because the February 2030 RPI-to-CPIH alignment is structurally material for long-dated IL gilts. Until the observed-data and split-assumption slice is built, IL gilts are priced and held in the portfolio but excluded from yield ranking, switch logic, and the LP candidate universe.
 
 ### Recommendation Pipeline
 
@@ -229,7 +248,7 @@ Every solve writes a replayable snapshot to `allocation_runs`. The stored payloa
 
 An optional explanation layer sits on top of persisted system state and produces readable memos, short recommendation summaries, decision-support notes, and question-answering for the local user. It is read-only with respect to authoritative portfolio, market, signal, and allocation tables. It does not create prices, override signals, or write recommendation state.
 
-Its inputs are existing persisted artefacts such as `allocation_runs`, `signal_readings`, `signal_events`, scenario outputs, friction results, and the append-only `decision_log`. Its job is to translate those records into concise explanations such as what changed since the prior run, why the recommended portfolio became more defensive or more aggressive, which constraints bound the solve, and which trades were blocked by friction or risk.
+Its inputs are existing persisted artefacts such as `allocation_runs`, `signal_readings`, `signal_events`, scenario outputs, friction results, and the append-only `decision_log`, plus provenance metadata carried alongside refreshed market and reference data. Its job is to translate those records into concise explanations such as what changed since the prior run, why the recommended portfolio became more defensive or more aggressive, which constraints bound the solve, which trades were blocked by friction or risk, and which upstream data was authoritative, stale, or fallback-sourced.
 
 ## Signal Layer
 
@@ -247,7 +266,7 @@ The persisted alert catalogue may contain multiple underlying alert episodes wit
 
 The GRY signal reuses the same shared gilt yield engine as the allocation engine. There is no second yield-calculation path inside the signal layer. Held and candidate conventional gilts are compared from the same LSE market snapshot so the signal answers a same-timestamp market question rather than mixing fresh candidate prices with stale imported holdings prices.
 
-The headline ranking is conventional-gilt only by default. Owned index-linked gilts remain visible in holdings and risk views, but without an RPI assumption they are treated as monitored but manual and are excluded from yield-gap comparison and switch logic. If an expected RPI assumption is supplied later, index-linked gilts may join comparison after real-to-nominal conversion.
+The headline ranking is conventional-gilt only by default. Owned index-linked gilts remain visible in holdings and risk views, but without the required forward inflation assumptions they are treated as monitored but manual and are excluded from yield-gap comparison and switch logic. If the forward inflation inputs are supplied later, index-linked gilts may join comparison after real-to-nominal conversion.
 
 The ranked conventional-gilt table is always visible. The switch banner fires only when there is at least one comparable held conventional gilt and the best market conventional gilt beats the relevant held comparison by more than the configured threshold. If there are no comparable held conventional gilts, the ranking remains visible and the switch banner is suppressed with a plain-English note.
 
@@ -421,7 +440,9 @@ No special branch is required for near-maturity holdings. The break-even formula
 
 ## Dashboard UX
 
-The dashboard is a single-file Streamlit app with `layout="wide"` and an expanded sidebar. It reads persisted tables only. It does not fetch raw market data directly. Market refresh, signal history, and cache writes remain owned by the refresh coordinator.
+The dashboard is a Streamlit app with `layout="wide"` and an expanded sidebar. It reads persisted tables only. It does not fetch raw market data directly. Market refresh, signal history, and cache writes remain owned by the refresh coordinator.
+
+The current implementation may still be physically small, but the design does not treat a single-file app structure as a goal. As explanation surfaces, provenance displays, and local MCP read tools expand, presentation code should be split into modules so portfolio views, signal views, scenarios, decision logging, and explanation/reporting can evolve without turning the dashboard into one monolithic file.
 
 ### Layout
 
@@ -436,7 +457,7 @@ Firing signals render as banners above the tabs so they remain visible regardles
 
 ### Sidebar Controls
 
-The sidebar exposes the full active assumption set required by the system:
+The sidebar exposes the full active assumption set required by the system. Observed inflation data and index-ratio inputs come from refresh sources, not manual entry.
 
 - Scenario selector and scenario magnitude
 - GRY improvement threshold
@@ -448,14 +469,15 @@ The sidebar exposes the full active assumption set required by the system:
 - Max single-position concentration
 - Minimum MMF or cash floor
 - Minimum short-duration floor
-- Expected RPI assumption
+- Expected RPI assumption to January 2030
+- Expected post-2030 RPI or CPIH-aligned assumption
 - Interactive Investor trade fee
 - Expected hold period
 - Asset-class spread assumptions
 
 Values live in `st.session_state` with explicit keys so all tabs read the same current assumptions.
 
-The canonical v1 field names and defaults for those sidebar assumptions are frozen in `src/investment_optimiser/policy_pack_v1.json` so allocator, scenario, and recommendation slices can consume the same schema.
+The canonical field names and defaults for those sidebar assumptions are frozen in `src/investment_optimiser/policy_pack_v1.json` so allocator, scenario, and recommendation slices can consume the same schema. The next revision of that policy pack should replace the single expected-RPI field with explicit pre-2030 and post-2030 forward-inflation keys.
 
 The Portfolio tab includes a `Refresh market data` control near the holdings KPIs and table. It refreshes market and reference sources only, remains separate from portfolio CSV import, surfaces a visible last-successful refresh timestamp, clears cached query results on success, and reruns the app immediately.
 
@@ -524,6 +546,15 @@ The schema follows these rules:
 - composite-key daily cache and snapshot tables use `WITHOUT ROWID`
 - daily reruns use `ON CONFLICT DO UPDATE`
 - no generic instrument master table is introduced
+- market and reference tables carry explicit provenance fields rather than relying on implicit source meaning alone
+
+For any persisted market or reference datum that can materially affect a recommendation, provenance is a first-class design concept. At minimum the persisted shape should be able to answer:
+
+- which provider or upstream source produced the datum
+- when it was fetched
+- what date it is actually as-of
+- whether it is authoritative, official, unofficial, or fallback
+- whether the row was derived from a cached or degraded path
 
 ### Core Tables
 
@@ -546,9 +577,9 @@ The system persists fourteen tables:
 
 `portfolio_snapshots` stores one row per `(snapshot_date, symbol)`. `signal_readings` stores one row per `(reading_date, signal_name, metric_name)`. `signal_events` stores one row per alert episode, not one row per daily evaluation. `decision_log` is append-only with a required structured `action` and optional `signal_event_id` link plus JSON `instruments_affected`.
 
-`yield_curve_cache` stores both named yield-curve points and the base rate. `gilt_price_cache` stores daily clean price, GRY, modified duration, coupon, maturity, and fetch timestamp for each successfully solved gilt. `equity_valuation_cache` stores the global equity benchmark `trailingPE` and derived `earnings_yield` by fetch date and `source_name`, keyed to the configured benchmark ticker. The equity signal uses this table to avoid refetching on every evaluation and to support the five-day stale fallback. `allocation_runs` stores the replayable optimiser audit payload as JSON-backed solve records with indexed scalar metadata columns for quick lookup.
+`yield_curve_cache` stores both named yield-curve points and the base rate. `gilt_price_cache` stores daily clean price, GRY, modified duration, coupon, maturity, and provenance metadata for each successfully solved gilt. `equity_valuation_cache` stores the global equity benchmark `trailingPE`, derived `earnings_yield`, and provenance fields by fetch date and `source_name`, keyed to the configured benchmark ticker. The equity signal uses this table to avoid refetching on every evaluation and to support the five-day stale fallback. `allocation_runs` stores the replayable optimiser audit payload as JSON-backed solve records with indexed scalar metadata columns for quick lookup.
 
-`non_gilt_reference` stores asset type and source classification for non-gilt holdings, refreshed via a portfolio-scoped Yahoo Finance enrichment pass (the LSE bulk reference feeds are paid products and not available as free public endpoints). `strategic_baseline` stores user-authored baseline allocations with bucket weights and policy version. `equity_benchmark_prices` stores benchmark index price history used by the equity opportunity signal.
+`non_gilt_reference` stores asset type, source classification, and provenance metadata for non-gilt holdings, refreshed via a portfolio-scoped Yahoo Finance enrichment pass (the LSE bulk reference feeds are paid products and not available as free public endpoints). `strategic_baseline` stores user-authored baseline allocations with bucket weights and policy version. `equity_benchmark_prices` stores benchmark index price history used by the equity opportunity signal and should retain enough provenance to distinguish direct fetches from degraded-cache fallbacks.
 
 The only required foreign key is `decision_log.signal_event_id -> signal_events.id ON DELETE SET NULL`. Historical cache and snapshot tables do not point back to `gilt_reference`.
 

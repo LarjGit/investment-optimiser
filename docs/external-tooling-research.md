@@ -21,11 +21,11 @@ One of the three research passes (Gemini) contained several fabricated or incorr
 
 ## Executive Summary
 
-- **The most urgent production gap is IL gilt RPI data.** Older IL gilts (1980s–90s issuances, e.g. GB0008932666) are quoted by LSE in nominal (uplift-applied) prices. The app cannot solve their real GRY without the current RPI index ratio — confirmed in `docs/solutions/2026-05-22-il-gilt-price-types-and-negative-yields.md`. The fix requires either the DMO D10C XML feed (index ratios by ISIN) or the ONS CHAW series (raw RPI monthly values). Both are free and straightforward.
+- **The most urgent fixed-income design gap is clearer handling of observed vs forward inflation inputs.** Older IL gilts (1980s–90s issuances, e.g. GB0008932666) are quoted by LSE in nominal (uplift-applied) prices and require an observed index ratio to solve correctly — confirmed in `docs/solutions/2026-05-22-il-gilt-price-types-and-negative-yields.md`. The current code deliberately excludes those old 3-month-lag linkers at ingest, so this is not a current production bug. If they are brought back into scope later, the fix requires either the DMO D10C XML feed (index ratios by ISIN) or the ONS CHAW series (raw RPI monthly values). Both are free and straightforward, and they should complement rather than replace the user-authored forward RPI assumption used for decision-making.
 
-- **The 2030 RPI→CPIH transition is real, confirmed, and architecturally material.** From February 2030, RPI methodology will be aligned with CPIH, reducing RPI by approximately 1% per annum. No compensation for IL gilt holders. All IL gilts maturing after February 2030 are affected. The app currently uses a single `rpi_assumption_pct` for all IL gilts; this must eventually be split into a pre-2030 and post-2030 regime assumption.
+- **The 2030 RPI→CPIH transition is real, confirmed, and architecturally material.** From February 2030, RPI methodology will be aligned with CPIH, reducing RPI by approximately 1% per annum. No compensation for IL gilt holders. All IL gilts maturing after February 2030 are affected. The app currently uses a single `rpi_assumption_pct` for all IL gilts; this should be replaced by a clearer model that separates observed RPI inputs from forward assumptions and splits forward assumptions into pre-2030 and post-2030 regimes.
 
-- **rateslib 2.7.1 (April 2026) is the strongest validation layer for the GRY engine.** It has explicit `calc_mode="uk_gb"` for UK DMO conventions, ex-dividend support matching the 7-business-day rule, and an `IndexFixedRateBond` class for IL gilts. Licence is CC-BY-NC-ND — permissive for a private non-commercial tool. Prefer over QuantLib for validation because the UK-specific conventions are explicit rather than requiring manual configuration.
+- **rateslib 2.7.1 (April 2026) is the strongest validation layer for the GRY engine.** It has explicit `calc_mode="uk_gb"` for UK DMO conventions, ex-dividend support matching the 7-business-day rule, and an `IndexFixedRateBond` class for IL gilts. Its current licence model is source-available for non-commercial use, with a paid commercial licence for broader use. Prefer over QuantLib for validation because the UK-specific conventions are explicit rather than requiring manual configuration.
 
 - **The LP solver (`scipy.optimize.linprog`) is clean and already extracts marginals — CVXPY is a worthwhile but non-urgent upgrade.** The LP operates at bucket level (not asset level), is well-structured in `lp_solver.py`, and already surfaces binding constraints and dual values. CVXPY would improve constraint readability and infeasibility diagnostics (the joint tilt-band/turnover infeasibility problem documented in `docs/solutions/2026-05-20-lp-turnover-tilt-band-joint-infeasibility.md` is the primary motivator). Migrate when the constraint set next grows, not before.
 
@@ -35,9 +35,9 @@ One of the three research passes (Gemini) contained several fabricated or incorr
 
 ## Part 1: Architectural Flags
 
-### 1.1 Older IL gilts require RPI index ratio to price — currently unresolvable
+### 1.1 Older excluded IL gilts require observed RPI index ratio to return to scope
 
-**Severity: production gap.** Gilts issued in the 1980s–90s (e.g. GB0008932666 4⅛% IL 2030, GB0031790826 2% IL 2035) are quoted by LSE as nominal (index-uplifted) prices. The app detects these via the heuristic `clean_price > undiscounted_real_sum * 1.5` and skips them with a warning. They are excluded from the gilt ranking and cannot be compared against conventional gilts for switch opportunities.
+**Severity: deliberate coverage gap, not a current production bug.** Gilts issued in the 1980s–90s (e.g. GB0008932666 4⅛% IL 2030, GB0031790826 2% IL 2035) are quoted by LSE as nominal (index-uplifted) prices. The current code excludes these old 3-month-lag linkers at the DMO parse stage, so they do not enter the ranking or switch logic at all. If the product later expands to include them, they will require observed index-ratio data rather than a forward-only RPI assumption.
 
 **Fix:** Integrate either D10C (DMO XML, index ratios per ISIN) or ONS CHAW (raw RPI monthly values). D10C is the more direct route: it gives `INDEX_RATIO_OR_RPI` per ISIN per settlement date, which is exactly what `compute_real_gry` needs as a multiplier. See Part 2.1 and Part 2.3.
 
@@ -93,7 +93,7 @@ This is exactly what `gilt_analytics_handler` needs to price older IL gilts that
 
 **Update cadence:** D1A updates on business days. D10C updates daily.
 
-**Verdict: augment D1A with D10C.** D10C is the highest-priority DMO addition — it unblocks the IL gilt pricing production gap (Arch Flag 1.1). Add a `dmo_d10c_handler` that fetches index ratios and stores them in a new `gilt_index_ratios` table. The `gilt_analytics_handler` should use these ratios before falling back to the skip-with-warning path.
+**Verdict: augment D1A with D10C when the product needs observed IL pricing inputs.** D10C is the cleanest DMO addition for two jobs: supporting the observed-vs-forward inflation split in the design, and reintroducing currently excluded old IL gilts if that coverage is wanted later. Add a `dmo_d10c_handler` that fetches index ratios and stores them in a new `gilt_index_ratios` table. The `gilt_analytics_handler` should use these ratios before any fallback or exclusion path.
 
 ---
 
@@ -210,7 +210,7 @@ Fields: EPIC (TIDM), name, coupon, maturity date, clean price, GRY, accrued inte
 
 **Version:** 2.7.1 (April 4, 2026). v2.7.0 released March 30, 2026.  
 **PyPI:** `pip install rateslib` / `uv add rateslib`  
-**Licence:** Creative Commons BY-NC-ND 4.0 — source-available, **non-commercial only**. For a private investor's local tool this is fully permissive. For any future commercial distribution, reassess.  
+**Licence:** Dual-licensed source-available: a free non-commercial licence and a paid commercial subscription licence. For a private investor's local tool this is acceptable. For any future business or redistributed use, reassess early.  
 **Windows:** Pre-built wheels for x86-64, ARM64, i686. No MSVC or C++ compile required.  
 **GitHub:** `attack68/rateslib` — actively maintained.
 
@@ -273,7 +273,7 @@ bond = ql.CPIBond(
 
 **Deprecation note (v1.38/v1.39):** The `PiecewiseZeroInflationCurve` constructor changed. Any QuantLib inflation curve code predating v1.38 will fail; use current constructor signatures from the v1.40+ docs.
 
-**Verdict: use as secondary cross-check alongside rateslib.** The BSD licence is more permissive than rateslib's CC-BY-NC-ND for any future commercial use. The ex-div gap makes it less clean as a primary validator for the app's main GRY engine, but useful as an independent institutional-grade sanity check.
+**Verdict: use as secondary cross-check alongside rateslib.** The BSD licence is more permissive than rateslib's non-commercial-default licensing model for any future commercial use. The ex-div gap makes it less clean as a primary validator for the app's main GRY engine, but useful as an independent institutional-grade sanity check.
 
 ---
 
@@ -612,13 +612,13 @@ Source hierarchy for this app:
 
 ## Part 9: Prioritised Recommendations
 
-### Tier 1 — Immediate (unblock production gaps)
+### Tier 1 — Immediate (current design commitments and near-term improvements)
 
 **1. Integrate DMO D10C for IL gilt index ratios.**  
-Fetch `https://www.dmo.gov.uk/data/XmlDataReport?reportCode=D10C`. Store `(isin, settlement_date, index_ratio)` in a new `gilt_index_ratios` table. In `gilt_analytics_handler`, use the index ratio to convert nominal-quoted IL gilt prices to real prices before calling `compute_real_gry`. This unblocks the older IL gilts (GB0008932666, GB0031790826, etc.) that are currently skipped with a warning.
+Fetch `https://www.dmo.gov.uk/data/XmlDataReport?reportCode=D10C`. Store `(isin, settlement_date, index_ratio)` in a new `gilt_index_ratios` table. In `gilt_analytics_handler`, use the index ratio to support the observed-vs-forward inflation split and, if desired later, to reintroduce excluded older IL gilts (GB0008932666, GB0031790826, etc.) into analytics.
 
 **2. Integrate ONS CHAW for published RPI monthly index levels.**  
-`GET https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/chaw/mm23/data` — no API key, generous rate limits. Add an `ons_rpi` handler to `REFRESH_SOURCE_ORDER`. Store monthly values in an `rpi_monthly_index` table. Use `months[-4]['value']` for the 3-month observation lag. This provides the actual current RPI for D10C-independent index ratio computation.
+`GET https://www.ons.gov.uk/economy/inflationandpriceindices/timeseries/chaw/mm23/data` — no API key, generous rate limits. Add an `ons_rpi` handler to `REFRESH_SOURCE_ORDER`. Store monthly values in an `rpi_monthly_index` table. Use `months[-4]['value']` for the 3-month observation lag. This provides the actual current RPI for D10C-independent index ratio computation; it supplements rather than replaces the forward inflation assumptions used for portfolio decisions.
 
 **3. Add rateslib cross-check tests.**  
 `uv add --optional rateslib`. Write `tests/analytics/test_rateslib_crosscheck.py` with parametric tests comparing `compute_gry` against `rateslib.FixedRateBond(spec="uk_gb").ytm()` within 0.5bp. Equivalent test for modified duration. Run in CI. This provides a regression safety net for the hand-rolled engine without replacing it.
@@ -672,7 +672,7 @@ At v2, if the optimiser needs CVaR risk floors or walk-forward validation, migra
 | Component | Verdict | Justification |
 |-----------|---------|---------------|
 | GRY calculation (Newton/brentq, ICMA, T+1, ex-div) | **Keep** + rateslib validation | Correct and transparent; add rateslib cross-check in CI |
-| IL gilt real GRY (real-price solve + Fisher) | **Keep** + D10C/CHAW data | Engine is correct for real-priced gilts; add index ratio data to unblock nominal-priced older gilts |
+| IL gilt real GRY (real-price solve + Fisher) | **Keep** + D10C/CHAW data | Engine is correct for real-priced gilts; add observed index-ratio data to support the new inflation-input design and, if wanted later, older excluded IL gilts |
 | Modified duration (same cash-flow solve) | **Keep** | Derived correctly from the same price/cash-flow model |
 | IL gilt RPI assumption | **Augment** | Add 2030 split: `rpi_assumption_pct` pre-2030, `rpi_assumption_post_2030_pct` post-2030 |
 | Yield curve fetch (BoE IADB CSV) | **Augment** | Keep IADB for daily base rate + par yields; add ONS CHAW for RPI; add BoE real spot ZIP for breakeven (v2) |
@@ -681,4 +681,4 @@ At v2, if the optimiser needs CVaR risk floors or walk-forward validation, migra
 | Portfolio allocator (scipy linprog HiGHS) | **Augment** | Migrate to CVXPY on next constraint addition — same solver, better diagnostics |
 | Data persistence (SQLite WAL, hand-written migrations) | **Keep** | Appropriate for local single-user tool |
 | Dashboard (Streamlit) | **Keep** | No reason to change |
-| RPI data source | **Replace** | Currently user-entered assumption only; replace with ONS CHAW auto-fetch for published RPI values |
+| RPI data source | **Augment** | Add ONS CHAW and/or D10C for observed RPI and index-ratio mechanics; keep forward RPI as a user-authored policy assumption, split into pre-/post-2030 regimes |
