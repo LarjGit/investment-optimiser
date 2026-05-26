@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import csv
-import io
 import sqlite3
 import urllib.request
 from datetime import UTC, datetime
 from fractions import Fraction
 from html.parser import HTMLParser
-from importlib import resources
 
 
 _CONVENTIONAL_URL = "https://www.dividenddata.co.uk/uk-gilts-prices-yields.py"
@@ -98,46 +95,11 @@ def _build_live_lookup() -> dict[tuple[float, str], str]:
     return lookup
 
 
-def _load_cache_text() -> str:
-    return (
-        resources.files("investment_optimiser")
-        .joinpath("tidm_cache.csv")
-        .read_text(encoding="utf-8")
-    )
-
-
-def _parse_tidm_csv(text: str) -> list[tuple[str, str]]:
-    reader = csv.DictReader(io.StringIO(text))
-    pairs = []
-    for row in reader:
-        isin = (row.get("isin") or "").strip()
-        tidm = (row.get("tidm") or "").strip()
-        if isin and tidm:
-            pairs.append((isin, tidm))
-    return pairs
-
-
-def _apply_csv_supplement(
-    connection: sqlite3.Connection, last_updated: str
-) -> None:
-    for isin, tidm in _parse_tidm_csv(_load_cache_text()):
-        connection.execute(
-            "UPDATE gilt_reference SET tidm = ?, last_updated = ?"
-            " WHERE isin = ? AND tidm IS NULL",
-            (tidm, last_updated, isin),
-        )
-
-
 def tidm_handler(connection: sqlite3.Connection) -> None:
     last_updated = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     try:
         lookup = _build_live_lookup()
     except Exception:
-        for isin, tidm in _parse_tidm_csv(_load_cache_text()):
-            connection.execute(
-                "UPDATE gilt_reference SET tidm = ?, last_updated = ? WHERE isin = ?",
-                (tidm, last_updated, isin),
-            )
         return
 
     for isin, coupon_pct, maturity_date in connection.execute(
@@ -149,6 +111,3 @@ def tidm_handler(connection: sqlite3.Connection) -> None:
                 "UPDATE gilt_reference SET tidm = ?, last_updated = ? WHERE isin = ?",
                 (tidm, last_updated, isin),
             )
-
-    # CSV seeds cover gilts absent from dividenddata (e.g. old high-coupon index-linked)
-    _apply_csv_supplement(connection, last_updated)
