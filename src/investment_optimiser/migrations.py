@@ -590,6 +590,17 @@ def add_dmo_d10c_inflation_refresh_source(connection: sqlite3.Connection) -> Non
     )
 
 
+def add_il_exclusion_reason_column(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(gilt_price_cache)")
+    }
+    if "il_exclusion_reason" not in existing_columns:
+        connection.execute(
+            "ALTER TABLE gilt_price_cache ADD COLUMN il_exclusion_reason TEXT DEFAULT NULL"
+        )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -604,4 +615,5 @@ MIGRATIONS: list[Migration] = [
     add_gilt_price_cache_bid_offer_columns,
     create_observed_inflation_cache,
     add_dmo_d10c_inflation_refresh_source,
+    add_il_exclusion_reason_column,
 ]
