@@ -21,7 +21,12 @@
       "Bash(python *)",
       "WebFetch(domain:pypi.org)",
       "Bash(gh api *)",
-      "WebFetch(domain:dmo.gov.uk)"
+      "WebFetch(domain:dmo.gov.uk)",
+      "PowerShell(git *)",
+      "Bash(git remote *)",
+      "WebFetch(domain:nick3499.medium.com)",
+      "Bash(git commit -m 'docs: add solutions note for DMO D10C URL and data shape *)",
+      "Bash(git commit -m 'chore: allow git and medium.com in project settings permissions *)"
     ]
   }
 }
