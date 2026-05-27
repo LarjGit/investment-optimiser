@@ -62,6 +62,46 @@ def test_app_boots_into_tab_shell_and_runs_migrations(tmp_path: Path) -> None:
     } <= tables
 
 
+def test_app_uses_split_forward_inflation_sidebar_controls(tmp_path: Path) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {
+        "db": {"url": f"sqlite:///{db_path.as_posix()}"}
+    }
+
+    app.run(timeout=10)
+
+    assert not app.exception
+
+    number_inputs_by_label = {widget.label: widget for widget in app.number_input}
+
+    pre_2030 = number_inputs_by_label["Expected RPI assumption to January 2030 (%)"]
+    post_2030 = number_inputs_by_label[
+        "Expected post-2030 RPI or CPIH-aligned assumption (%)"
+    ]
+
+    assert pre_2030.value == 3.0
+    assert post_2030.value == 3.0
+
+    pre_2030.set_value(4.25)
+    post_2030.set_value(2.5)
+    app.run(timeout=10)
+
+    number_inputs_by_label = {widget.label: widget for widget in app.number_input}
+    assert (
+        number_inputs_by_label["Expected RPI assumption to January 2030 (%)"].value
+        == 4.25
+    )
+    assert (
+        number_inputs_by_label[
+            "Expected post-2030 RPI or CPIH-aligned assumption (%)"
+        ].value
+        == 2.5
+    )
+
+
 def test_app_uploads_csv_and_immediately_updates_authoritative_snapshot(
     tmp_path: Path,
 ) -> None:

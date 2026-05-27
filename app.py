@@ -89,7 +89,9 @@ REFRESH_FEEDBACK_KEY = "refresh_feedback"
 REFRESH_WARNING_MESSAGES_KEY = "refresh_warning_messages"
 PORTFOLIO_UPLOAD_WIDGET_KEY = "ii_csv_upload"
 ERP_THRESHOLD_KEY = "erp_threshold_pct"
-RPI_ASSUMPTION_KEY = "expected_rpi_pct"
+LEGACY_RPI_ASSUMPTION_KEY = "expected_rpi_pct"
+RPI_ASSUMPTION_PRE_2030_KEY = "rpi_assumption_pre_2030_pct"
+RPI_ASSUMPTION_POST_2030_KEY = "rpi_assumption_post_2030_pct"
 DURATION_FLOOR_KEY = "duration_floor_years"
 DURATION_CEILING_KEY = "duration_ceiling_years"
 LIQUIDITY_THRESHOLD_KEY = "liquidity_concentration_10y_plus_pct"
@@ -103,6 +105,44 @@ def _policy_field_default(key: str) -> object:
         if field.get("key") == key:
             return field["default"]
     return None
+
+
+def _policy_field_float_default(key: str, fallback: float) -> float:
+    default_value = _policy_field_default(key)
+    if default_value is None:
+        return fallback
+    return float(default_value)
+
+
+def _initialise_forward_inflation_session_state() -> None:
+    legacy_value = st.session_state.get(LEGACY_RPI_ASSUMPTION_KEY)
+
+    def seed_forward_inflation_key(key: str) -> None:
+        if key in st.session_state:
+            return
+
+        if legacy_value is not None:
+            st.session_state[key] = float(legacy_value)
+            return
+
+        st.session_state[key] = _policy_field_float_default(key, 3.0)
+
+    seed_forward_inflation_key(RPI_ASSUMPTION_PRE_2030_KEY)
+    seed_forward_inflation_key(RPI_ASSUMPTION_POST_2030_KEY)
+
+    st.session_state.pop(LEGACY_RPI_ASSUMPTION_KEY, None)
+
+
+def _active_forward_inflation_bridge_pct() -> float | None:
+    """Temporary scalar bridge using the lower forward assumption until downstream IL code is split-aware."""
+    _initialise_forward_inflation_session_state()
+
+    pre_2030 = float(st.session_state.get(RPI_ASSUMPTION_PRE_2030_KEY, 0.0))
+    post_2030 = float(st.session_state.get(RPI_ASSUMPTION_POST_2030_KEY, 0.0))
+    if pre_2030 <= 0.0 or post_2030 <= 0.0:
+        return None
+
+    return min(pre_2030, post_2030)
 
 
 def get_database_url() -> str:
@@ -705,7 +745,7 @@ def render_refresh_controls(
                     "lse_gilt_prices": lse_gilt_prices_handler,
                     "gilt_analytics": partial(
                         gilt_analytics_handler,
-                        rpi_assumption_pct=float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0)) or None,
+                        rpi_assumption_pct=_active_forward_inflation_bridge_pct(),
                     ),
                     "yfinance_equities": yfinance_equities_handler,
                 },
@@ -812,20 +852,31 @@ def render_sidebar(
         )
         st.divider()
         st.caption("Index-Linked Gilts")
-        if RPI_ASSUMPTION_KEY not in st.session_state:
-            st.session_state[RPI_ASSUMPTION_KEY] = float(
-                _policy_field_default("expected_rpi_pct") or 3.0
-            )
+        _initialise_forward_inflation_session_state()
         st.number_input(
-            "RPI assumption (%)",
+            "Expected RPI assumption to January 2030 (%)",
             min_value=0.0,
             max_value=15.0,
             step=0.25,
-            key=RPI_ASSUMPTION_KEY,
+            key=RPI_ASSUMPTION_PRE_2030_KEY,
             help=(
-                "Assumed annual RPI inflation used to compute IL gilt real GRY and "
-                "nominal-equivalent yield for comparison with conventional gilts. "
-                "Set to 0 to exclude IL gilts from yield ranking and optimisation."
+                "User-authored forward inflation assumption for the period up to January "
+                "2030. Set either forward inflation field to 0 to exclude IL gilts from "
+                "yield ranking and optimisation until the full split-assumption analytics "
+                "slice lands."
+            ),
+        )
+        st.number_input(
+            "Expected post-2030 RPI or CPIH-aligned assumption (%)",
+            min_value=0.0,
+            max_value=15.0,
+            step=0.25,
+            key=RPI_ASSUMPTION_POST_2030_KEY,
+            help=(
+                "User-authored forward inflation assumption for the post-2030 regime "
+                "after the planned RPI/CPIH alignment. Set either forward inflation field "
+                "to 0 to exclude IL gilts from yield ranking and optimisation until the "
+                "full split-assumption analytics slice lands."
             ),
         )
         st.divider()
@@ -1132,7 +1183,7 @@ def render_gilt_ranking_card(
     holdings_df: pd.DataFrame | None = None,
     policy: dict | None = None,
 ) -> None:
-    rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
+    forward_inflation_bridge = _active_forward_inflation_bridge_pct()
 
     if "instrument_type" in df.columns:
         il_df = df[df["instrument_type"] == "Index-linked"]
@@ -1151,7 +1202,7 @@ def render_gilt_ranking_card(
         return
 
     # Build the display DataFrame: conventional by gry_pct; IL by nominal_equivalent_gry_pct
-    if rpi_assumption and not il_df.empty:
+    if forward_inflation_bridge is not None and not il_df.empty:
         il_with_analytics = il_df[il_df["nominal_equivalent_gry_pct"].notna()].copy()
         if not il_with_analytics.empty:
             il_with_analytics = il_with_analytics.assign(
@@ -1219,7 +1270,7 @@ def render_gilt_ranking_card(
     _render_gilt_switch_table(df, held_isins, holdings_df, policy)
 
     il_held = not il_df.empty
-    if rpi_assumption and il_held:
+    if forward_inflation_bridge is not None and il_held:
         neq_col = "nominal_equivalent_gry_pct"
         il_uncomputed = int(il_df[neq_col].isna().sum()) if neq_col in il_df.columns else len(il_df)
         if il_uncomputed:
@@ -1227,13 +1278,17 @@ def render_gilt_ranking_card(
                 f"{il_uncomputed} index-linked gilt(s) are held but have no computed real GRY yet. "
                 "Run a market data refresh to include them in the ranking."
             )
-    elif il_held and not rpi_assumption:
+    elif il_held and forward_inflation_bridge is None:
         il_count = len(il_df)
         st.info(
-            f"{il_count} index-linked gilt(s) are excluded from this ranking because no RPI assumption "
-            "is set. Set an RPI assumption in the sidebar to include them in yield comparison and optimisation."
+            f"{il_count} index-linked gilt(s) are excluded from this ranking because the forward inflation "
+            "assumptions are incomplete. Set both forward inflation inputs in the sidebar to include them "
+            "in yield comparison and optimisation."
         )
-    st.caption("Ranked by GRY descending. IL gilts use nominal-equivalent GRY at the assumed RPI. Held = currently in your portfolio.")
+    st.caption(
+        "Ranked by GRY descending. IL gilts use nominal-equivalent GRY derived from the active "
+        "forward inflation assumptions. Held = currently in your portfolio."
+    )
 
 
 def render_equity_macro_signal_card(
@@ -1462,14 +1517,14 @@ def render_equity_opportunity_signal_card(conn: sqlite3.Connection, benchmark_ti
 
 
 def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
-    """Return gilt ranking for LP: conventional always; IL only when RPI set and analytics present."""
-    rpi_assumption = float(st.session_state.get(RPI_ASSUMPTION_KEY, 0.0))
+    """Return gilt ranking for LP: conventional always; IL only when forward inflation is set."""
+    forward_inflation_bridge = _active_forward_inflation_bridge_pct()
 
     if "instrument_type" not in gilt_ranking.columns:
         return gilt_ranking
 
     conventional = gilt_ranking[gilt_ranking["instrument_type"] == "Conventional"].copy()
-    if not rpi_assumption:
+    if forward_inflation_bridge is None:
         return conventional
 
     if "nominal_equivalent_gry_pct" not in gilt_ranking.columns:
