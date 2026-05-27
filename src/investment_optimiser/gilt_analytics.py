@@ -349,60 +349,68 @@ def gilt_analytics_handler(
             updates,
         )
 
-    if (
-        forward_rpi_pre_2030_pct is not None
-        and forward_rpi_pre_2030_pct > 0.0
-        and forward_rpi_post_2030_pct is not None
-        and forward_rpi_post_2030_pct > 0.0
-    ):
-        observed_by_isin = {
-            row["isin"]: row for row in get_latest_observed_inflation(connection)
-        }
+    observed_by_isin = {
+        row["isin"]: row for row in get_latest_observed_inflation(connection)
+    }
 
-        il_rows = connection.execute(
+    il_rows = connection.execute(
+        """
+        SELECT gpc.isin, gpc.clean_price_gbp, gpc.coupon_pct, gpc.maturity_date
+        FROM gilt_price_cache gpc
+        JOIN gilt_reference gr ON gr.isin = gpc.isin
+        WHERE gpc.cache_date = ? AND gpc.nominal_equivalent_gry_pct IS NULL
+          AND gr.instrument_type = 'Index-linked'
+        """,
+        (cache_date,),
+    ).fetchall()
+
+    il_updates: list[tuple[float, float, str, str]] = []
+    il_exclusion_updates: list[tuple[str, str, str]] = []
+    for isin, clean_price, coupon_pct, maturity_date_str in il_rows:
+        maturity = date.fromisoformat(maturity_date_str)
+        contract = resolve_il_contract(
+            isin=isin,
+            settlement_date=settlement,
+            maturity_date=maturity,
+            observed_row=observed_by_isin.get(isin),
+            forward_rpi_pre_2030_pct=forward_rpi_pre_2030_pct,
+            forward_rpi_post_2030_pct=forward_rpi_post_2030_pct,
+        )
+        if isinstance(contract, InflationResolutionError):
+            warnings.append(contract.warning)
+            il_exclusion_updates.append((contract.warning, cache_date, isin))
+            continue
+        result = compute_real_gry(
+            clean_price, coupon_pct, maturity, settlement,
+            contract.effective_forward_rpi_pct,
+        )
+        if result == (None, None):
+            reason = f"{isin} real GRY solve failed: no convergence"
+            warnings.append(reason)
+            il_exclusion_updates.append((reason, cache_date, isin))
+            continue
+        real_gry, nominal_equiv = result
+        il_updates.append((real_gry, nominal_equiv, cache_date, isin))
+
+    if il_updates:
+        connection.executemany(
             """
-            SELECT gpc.isin, gpc.clean_price_gbp, gpc.coupon_pct, gpc.maturity_date
-            FROM gilt_price_cache gpc
-            JOIN gilt_reference gr ON gr.isin = gpc.isin
-            WHERE gpc.cache_date = ? AND gpc.nominal_equivalent_gry_pct IS NULL
-              AND gr.instrument_type = 'Index-linked'
+            UPDATE gilt_price_cache
+            SET real_gry_pct = ?, nominal_equivalent_gry_pct = ?, il_exclusion_reason = NULL
+            WHERE cache_date = ? AND isin = ?
             """,
-            (cache_date,),
-        ).fetchall()
+            il_updates,
+        )
 
-        il_updates: list[tuple[float, float, str, str]] = []
-        for isin, clean_price, coupon_pct, maturity_date_str in il_rows:
-            maturity = date.fromisoformat(maturity_date_str)
-            contract = resolve_il_contract(
-                isin=isin,
-                settlement_date=settlement,
-                maturity_date=maturity,
-                observed_row=observed_by_isin.get(isin),
-                forward_rpi_pre_2030_pct=forward_rpi_pre_2030_pct,
-                forward_rpi_post_2030_pct=forward_rpi_post_2030_pct,
-            )
-            if isinstance(contract, InflationResolutionError):
-                warnings.append(contract.warning)
-                continue
-            result = compute_real_gry(
-                clean_price, coupon_pct, maturity, settlement,
-                contract.effective_forward_rpi_pct,
-            )
-            if result == (None, None):
-                warnings.append(f"{isin} real GRY solve failed: no convergence")
-                continue
-            real_gry, nominal_equiv = result
-            il_updates.append((real_gry, nominal_equiv, cache_date, isin))
-
-        if il_updates:
-            connection.executemany(
-                """
-                UPDATE gilt_price_cache
-                SET real_gry_pct = ?, nominal_equivalent_gry_pct = ?
-                WHERE cache_date = ? AND isin = ?
-                """,
-                il_updates,
-            )
+    if il_exclusion_updates:
+        connection.executemany(
+            """
+            UPDATE gilt_price_cache
+            SET il_exclusion_reason = ?
+            WHERE cache_date = ? AND isin = ?
+            """,
+            il_exclusion_updates,
+        )
 
     fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     _derive_benchmark_yields(connection, cache_date, fetched_at)

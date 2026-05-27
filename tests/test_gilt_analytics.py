@@ -524,6 +524,193 @@ def test_gilt_analytics_handler_skips_il_gilts_when_forward_assumptions_absent(
             ("GB00BZ1NTB69",),
         ).fetchone()
 
-    assert warnings == [], "No warnings expected when IL processing is simply not attempted"
+    # Handler now always runs the IL loop; missing forward assumptions produce a warning.
+    assert len(warnings) == 1
+    assert "GB00BZ1NTB69" in warnings[0]
+    assert "forward" in warnings[0].lower() or "rpi" in warnings[0].lower()
     assert row[0] is None
     assert row[1] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests 12–14: il_exclusion_reason persistence (issue #51)
+# ---------------------------------------------------------------------------
+
+
+def test_il_exclusion_reason_written_when_observed_data_missing(tmp_path: Path) -> None:
+    """Handler persists a distinct reason when D10C observed data is absent."""
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        # No observed_inflation_cache row — simulates missing D10C data
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        row = connection.execute(
+            "SELECT il_exclusion_reason FROM gilt_price_cache WHERE isin = ?",
+            ("GB00BZ1NTB69",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] is not None, "il_exclusion_reason should be set when D10C data is absent"
+    assert "observed" in row[0].lower() or "d10c" in row[0].lower() or "inflation data" in row[0].lower()
+
+
+def test_il_exclusion_reason_distinct_when_forward_assumptions_absent(tmp_path: Path) -> None:
+    """Reason when forward assumptions are missing must differ from 'no observed data' reason."""
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    il_isin = "GB00BZ1NTB69"
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin=il_isin,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin=il_isin,
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        _seed_observed_inflation_row(
+            connection,
+            isin=il_isin,
+            settlement_date=date.today().isoformat(),
+        )
+        connection.commit()
+
+    # Call handler with no forward assumptions (both None)
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(connection)
+        forward_absent_reason = connection.execute(
+            "SELECT il_exclusion_reason FROM gilt_price_cache WHERE isin = ?",
+            (il_isin,),
+        ).fetchone()[0]
+
+    # Now call with missing observed data instead
+    db_path2 = tmp_path / "investment_optimiser2.db"
+    initialize_database(f"sqlite:///{db_path2.as_posix()}")
+    with sqlite3.connect(db_path2) as connection:
+        _seed_reference_row(
+            connection,
+            isin=il_isin,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin=il_isin,
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        # No observed_inflation_cache row
+        connection.commit()
+
+    with sqlite3.connect(db_path2) as connection:
+        gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        no_data_reason = connection.execute(
+            "SELECT il_exclusion_reason FROM gilt_price_cache WHERE isin = ?",
+            (il_isin,),
+        ).fetchone()[0]
+
+    assert forward_absent_reason is not None, "Reason must be set when forward assumptions absent"
+    assert no_data_reason is not None, "Reason must be set when observed data absent"
+    assert forward_absent_reason != no_data_reason, (
+        "Distinct reasons required for each exclusion class; "
+        f"got '{forward_absent_reason}' and '{no_data_reason}'"
+    )
+
+
+def test_il_exclusion_reason_cleared_when_analytics_succeed(tmp_path: Path) -> None:
+    """il_exclusion_reason is set to NULL once all required inputs are present."""
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+    il_isin = "GB00BZ1NTB69"
+
+    # First run: no observed data → exclusion reason written
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin=il_isin,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin=il_isin,
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        connection.commit()
+        reason_after_first_run = connection.execute(
+            "SELECT il_exclusion_reason FROM gilt_price_cache WHERE isin = ?",
+            (il_isin,),
+        ).fetchone()[0]
+
+    assert reason_after_first_run is not None, "Reason should be set after first (failed) run"
+
+    # Second run: observed data now available → analytics succeed → reason cleared
+    with sqlite3.connect(db_path) as connection:
+        _seed_observed_inflation_row(
+            connection,
+            isin=il_isin,
+            settlement_date=date.today().isoformat(),
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT nominal_equivalent_gry_pct, il_exclusion_reason FROM gilt_price_cache WHERE isin = ?",
+            (il_isin,),
+        ).fetchone()
+
+    assert row[0] is not None, "nominal_equivalent_gry_pct should be populated on success"
+    assert row[1] is None, "il_exclusion_reason should be NULL after successful analytics"
