@@ -134,22 +134,6 @@ def _initialise_forward_inflation_session_state() -> None:
     st.session_state.pop(LEGACY_RPI_ASSUMPTION_KEY, None)
 
 
-def _active_forward_inflation_bridge_pct() -> float | None:
-    """Scalar bridge for dashboard display only — returns the lower of the two forward assumptions.
-
-    Used only for conditional display logic (showing/hiding IL gilt results on the dashboard).
-    The analytics call path passes the two forward assumptions separately; do not use this
-    function to feed ``gilt_analytics_handler``.
-    """
-    _initialise_forward_inflation_session_state()
-
-    pre_2030 = float(st.session_state.get(RPI_ASSUMPTION_PRE_2030_KEY, 0.0))
-    post_2030 = float(st.session_state.get(RPI_ASSUMPTION_POST_2030_KEY, 0.0))
-    if pre_2030 <= 0.0 or post_2030 <= 0.0:
-        return None
-
-    return min(pre_2030, post_2030)
-
 
 def get_database_url() -> str:
     configured_url = os.getenv("INVESTMENT_OPTIMISER_DB_URL")
@@ -316,7 +300,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             p.modified_duration_years,
             r.maturity_bracket,
             p.bid_price_gbp,
-            p.offer_price_gbp
+            p.offer_price_gbp,
+            p.il_exclusion_reason
         FROM gilt_price_cache p
         JOIN gilt_reference r ON r.isin = p.isin
         WHERE p.cache_date = (SELECT MAX(cache_date) FROM gilt_price_cache)
@@ -1192,10 +1177,8 @@ def render_gilt_ranking_card(
     holdings_df: pd.DataFrame | None = None,
     policy: dict | None = None,
 ) -> None:
-    forward_inflation_bridge = _active_forward_inflation_bridge_pct()
-
     if "instrument_type" in df.columns:
-        il_df = df[df["instrument_type"] == "Index-linked"]
+        il_df = df[df["instrument_type"] == "Index-linked"].copy()
         df = df[df["instrument_type"] == "Conventional"].copy()
     else:
         il_df = pd.DataFrame()
@@ -1210,14 +1193,12 @@ def render_gilt_ranking_card(
         )
         return
 
-    # Build the display DataFrame: conventional by gry_pct; IL by nominal_equivalent_gry_pct
-    if forward_inflation_bridge is not None and not il_df.empty:
-        il_with_analytics = il_df[il_df["nominal_equivalent_gry_pct"].notna()].copy()
-        if not il_with_analytics.empty:
-            il_with_analytics = il_with_analytics.assign(
-                gry_pct=il_with_analytics["nominal_equivalent_gry_pct"]
-            )
-            df = pd.concat([df, il_with_analytics], ignore_index=True)
+    # Add IL gilts that have a fully resolved nominal-equivalent GRY
+    if not il_df.empty and "nominal_equivalent_gry_pct" in il_df.columns:
+        il_eligible = il_df[il_df["nominal_equivalent_gry_pct"].notna()].copy()
+        if not il_eligible.empty:
+            il_eligible = il_eligible.assign(gry_pct=il_eligible["nominal_equivalent_gry_pct"])
+            df = pd.concat([df, il_eligible], ignore_index=True)
 
     if df["gry_pct"].isna().all():
         st.warning(
@@ -1278,22 +1259,10 @@ def render_gilt_ranking_card(
 
     _render_gilt_switch_table(df, held_isins, holdings_df, policy)
 
-    il_held = not il_df.empty
-    if forward_inflation_bridge is not None and il_held:
-        neq_col = "nominal_equivalent_gry_pct"
-        il_uncomputed = int(il_df[neq_col].isna().sum()) if neq_col in il_df.columns else len(il_df)
-        if il_uncomputed:
-            st.info(
-                f"{il_uncomputed} index-linked gilt(s) are held but have no computed real GRY yet. "
-                "Run a market data refresh to include them in the ranking."
-            )
-    elif il_held and forward_inflation_bridge is None:
-        il_count = len(il_df)
-        st.info(
-            f"{il_count} index-linked gilt(s) are excluded from this ranking because the forward inflation "
-            "assumptions are incomplete. Set both forward inflation inputs in the sidebar to include them "
-            "in yield comparison and optimisation."
-        )
+    # Show per-gilt exclusion reasons for any IL gilts that could not be resolved
+    if not il_df.empty and "il_exclusion_reason" in il_df.columns:
+        for reason in il_df["il_exclusion_reason"].dropna():
+            st.info(str(reason))
     st.caption(
         "Ranked by GRY descending. IL gilts use nominal-equivalent GRY derived from the active "
         "forward inflation assumptions. Held = currently in your portfolio."
@@ -1526,15 +1495,16 @@ def render_equity_opportunity_signal_card(conn: sqlite3.Connection, benchmark_ti
 
 
 def _build_lp_gilt_ranking(gilt_ranking: pd.DataFrame) -> pd.DataFrame:
-    """Return gilt ranking for LP: conventional always; IL only when forward inflation is set."""
-    forward_inflation_bridge = _active_forward_inflation_bridge_pct()
+    """Return gilt ranking for LP: conventional always; IL only when fully inflation-ready.
 
+    An IL gilt is eligible when ``nominal_equivalent_gry_pct`` is populated, which the
+    analytics handler sets only when both observed D10C data and forward RPI assumptions
+    are present.  No separate forward-inflation gate is needed here.
+    """
     if "instrument_type" not in gilt_ranking.columns:
         return gilt_ranking
 
     conventional = gilt_ranking[gilt_ranking["instrument_type"] == "Conventional"].copy()
-    if forward_inflation_bridge is None:
-        return conventional
 
     if "nominal_equivalent_gry_pct" not in gilt_ranking.columns:
         return conventional
