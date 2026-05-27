@@ -504,6 +504,92 @@ def add_gilt_price_cache_bid_offer_columns(connection: sqlite3.Connection) -> No
     )
 
 
+def create_observed_inflation_cache(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS observed_inflation_cache (
+            isin             TEXT NOT NULL,
+            settlement_date  TEXT NOT NULL,
+            instrument_name  TEXT NOT NULL,
+            index_ratio      REAL NOT NULL,
+            reference_rpi    REAL NOT NULL,
+            provider         TEXT NOT NULL,
+            fetched_at       TEXT NOT NULL,
+            confidence_tier  TEXT NOT NULL,
+            is_degraded      INTEGER NOT NULL,
+            PRIMARY KEY (isin, settlement_date)
+        ) STRICT, WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS ix_observed_inflation_isin_date
+        ON observed_inflation_cache(isin, settlement_date DESC);
+        """
+    )
+
+
+def add_dmo_d10c_inflation_refresh_source(connection: sqlite3.Connection) -> None:
+    refresh_log_sql = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'refresh_log'
+        """
+    ).fetchone()
+    if refresh_log_sql and "dmo_d10c_inflation" in (refresh_log_sql[0] or ""):
+        return
+
+    connection.execute("ALTER TABLE refresh_log RENAME TO refresh_log_old")
+    connection.executescript(
+        """
+        CREATE TABLE refresh_log (
+            id             INTEGER PRIMARY KEY,
+            source         TEXT NOT NULL CHECK (
+                source IN (
+                    'boe',
+                    'dmo_reference',
+                    'dmo_d10c_inflation',
+                    'blackrock_ftse_pe',
+                    'gilt_analytics',
+                    'lse_gilt_prices',
+                    'lse_tidm_bridge',
+                    'non_gilt_reference',
+                    'yfinance_equities'
+                )
+            ),
+            run_started_at TEXT NOT NULL,
+            finished_at    TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+            error_msg      TEXT
+        ) STRICT;
+
+        INSERT INTO refresh_log (
+            id,
+            source,
+            run_started_at,
+            finished_at,
+            status,
+            error_msg
+        )
+        SELECT
+            id,
+            source,
+            run_started_at,
+            finished_at,
+            status,
+            error_msg
+        FROM refresh_log_old;
+
+        DROP TABLE refresh_log_old;
+
+        CREATE INDEX IF NOT EXISTS ix_refresh_log_source_finished
+        ON refresh_log(source, finished_at DESC);
+
+        CREATE INDEX IF NOT EXISTS ix_refresh_log_source_success
+        ON refresh_log(source, finished_at DESC)
+        WHERE status = 'completed';
+        """
+    )
+
+
 MIGRATIONS: list[Migration] = [
     create_initial_schema,
     add_portfolio_snapshot_import_warning,
@@ -516,4 +602,6 @@ MIGRATIONS: list[Migration] = [
     add_il_gilt_gry_columns,
     create_equity_benchmark_prices_table,
     add_gilt_price_cache_bid_offer_columns,
+    create_observed_inflation_cache,
+    add_dmo_d10c_inflation_refresh_source,
 ]

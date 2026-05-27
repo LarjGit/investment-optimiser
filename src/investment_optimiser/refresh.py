@@ -19,6 +19,7 @@ from investment_optimiser.signal_persistence import run_signal_persistence
 REFRESH_SOURCE_ORDER = (
     "boe",
     "dmo_reference",
+    "dmo_d10c_inflation",
     "lse_tidm_bridge",
     "non_gilt_reference",
     "lse_gilt_prices",

@@ -16,6 +16,7 @@ from functools import partial
 
 from investment_optimiser.db import initialize_database, sqlite_path_from_url
 from investment_optimiser.dmo import dmo_handler
+from investment_optimiser.dmo_d10c import dmo_d10c_handler
 from investment_optimiser.gilt_analytics import gilt_analytics_handler
 from investment_optimiser.lse_gilt_prices import lse_gilt_prices_handler
 from investment_optimiser.non_gilt_reference import non_gilt_reference_handler
@@ -740,6 +741,7 @@ def render_refresh_controls(
                 source_handlers={
                     "boe": boe_handler,
                     "dmo_reference": dmo_handler,
+                    "dmo_d10c_inflation": dmo_d10c_handler,
                     "lse_tidm_bridge": tidm_handler,
                     "non_gilt_reference": non_gilt_reference_handler,
                     "lse_gilt_prices": lse_gilt_prices_handler,
