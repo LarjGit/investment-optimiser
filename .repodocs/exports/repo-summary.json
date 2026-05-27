@@ -1,0 +1,75 @@
+{
+  "repo_path": "C:\\workbench\\code\\investment-optimiser",
+  "classification": {
+    "primary": "library",
+    "secondary": [],
+    "confidence": "high"
+  },
+  "profile": {
+    "name": "library",
+    "confidence": "high",
+    "rationale": "derived from a single package-like unit without runtime entrypoint evidence"
+  },
+  "health": {
+    "rollup": "degraded",
+    "dimensions": {
+      "freshness": "mixed",
+      "coverage": "good",
+      "confidence": "poor",
+      "errors": "poor",
+      "conflicts": "good"
+    }
+  },
+  "primary_units": [
+    {
+      "display_name": "investment_optimiser",
+      "unit_type": "python_package",
+      "primary_role": null,
+      "root_path": "src/investment_optimiser",
+      "confidence": "high"
+    }
+  ],
+  "primary_entrypoints": [],
+  "generated_outputs": [
+    {
+      "output_id": "overview-md",
+      "path": "docs/generated/overview.md",
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "commands-md",
+      "path": "docs/generated/commands.md",
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "testing-md",
+      "path": "docs/generated/testing.md",
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "health-md",
+      "path": "docs/generated/health.md",
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "index-md",
+      "path": "docs/generated/index.md",
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "repo-summary-json",
+      "path": ".repodocs/exports/repo-summary.json",
+      "last_render_status": null
+    },
+    {
+      "output_id": "outputs-json",
+      "path": ".repodocs/exports/outputs.json",
+      "last_render_status": null
+    },
+    {
+      "output_id": "commands-json",
+      "path": ".repodocs/exports/commands.json",
+      "last_render_status": null
+    }
+  ]
+}

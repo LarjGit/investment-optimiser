@@ -1,0 +1,137 @@
+user:
+  scope:
+    include: []
+    exclude: []
+  privacy: {}
+  strictness:
+    mode: normal
+  outputs:
+    docs_root: docs/generated
+    exports_enabled: true
+
+resolved:
+  repo_classification:
+    primary: library
+    secondary: []
+    confidence: high
+  selected_profile:
+    name: library
+    confidence: high
+    rationale: derived from a single package-like unit without runtime 
+      entrypoint evidence
+  detectors:
+    - id: baseline.files
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: baseline.boundaries
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: baseline.docs
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: baseline.git
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: python.tests
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: python.symbols
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: python.packaging
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: package_json.runtime_units
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: python.entrypoints
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: package_json.entrypoints
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: project.commands
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+    - id: python.requirements
+      version: "1.0.0"
+      mode: standard
+      depth: standard
+      enabled: true
+  units:
+    - name: investment_optimiser
+      unit_type: python_package
+      root_path: src/investment_optimiser
+      confidence: high
+      evidence_summary: "detected via pyproject.toml [project]"
+  doc_plan:
+    - name: overview
+      path: docs/generated/overview.md
+      purpose: overview
+      primary_audience: developer
+      ownership_class: generated
+      enabled: true
+    - name: commands
+      path: docs/generated/commands.md
+      purpose: workflow
+      primary_audience: operator
+      ownership_class: generated
+      enabled: true
+    - name: testing
+      path: docs/generated/testing.md
+      purpose: reference
+      primary_audience: reviewer
+      ownership_class: generated
+      enabled: true
+    - name: health
+      path: docs/generated/health.md
+      purpose: health
+      primary_audience: maintainer
+      ownership_class: generated
+      enabled: true
+    - name: index
+      path: docs/generated/index.md
+      purpose: index
+      primary_audience: developer
+      ownership_class: generated
+      enabled: true
+    - name: repo-summary
+      path: .repodocs/exports/repo-summary.json
+      purpose: overview
+      primary_audience: maintainer
+      ownership_class: generated
+      enabled: true
+    - name: outputs
+      path: .repodocs/exports/outputs.json
+      purpose: index
+      primary_audience: maintainer
+      ownership_class: generated
+      enabled: true
+    - name: commands
+      path: .repodocs/exports/commands.json
+      purpose: workflow
+      primary_audience: operator
+      ownership_class: generated
+      enabled: true

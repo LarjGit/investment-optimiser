@@ -1,0 +1,77 @@
+{
+  "repo_path": "C:\\workbench\\code\\investment-optimiser",
+  "outputs": [
+    {
+      "output_id": "overview-md",
+      "path": "docs/generated/overview.md",
+      "purpose": "overview",
+      "primary_audience": "developer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "commands-md",
+      "path": "docs/generated/commands.md",
+      "purpose": "workflow",
+      "primary_audience": "operator",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "testing-md",
+      "path": "docs/generated/testing.md",
+      "purpose": "reference",
+      "primary_audience": "reviewer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "health-md",
+      "path": "docs/generated/health.md",
+      "purpose": "health",
+      "primary_audience": "maintainer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "index-md",
+      "path": "docs/generated/index.md",
+      "purpose": "index",
+      "primary_audience": "developer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": "created"
+    },
+    {
+      "output_id": "repo-summary-json",
+      "path": ".repodocs/exports/repo-summary.json",
+      "purpose": "overview",
+      "primary_audience": "maintainer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": null
+    },
+    {
+      "output_id": "outputs-json",
+      "path": ".repodocs/exports/outputs.json",
+      "purpose": "index",
+      "primary_audience": "maintainer",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": null
+    },
+    {
+      "output_id": "commands-json",
+      "path": ".repodocs/exports/commands.json",
+      "purpose": "workflow",
+      "primary_audience": "operator",
+      "ownership_class": "generated",
+      "enabled": true,
+      "last_render_status": null
+    }
+  ]
+}

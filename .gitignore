@@ -12,3 +12,6 @@ test_tmp.db
 investment_optimiser.db
 investment_optimiser.db-shm
 investment_optimiser.db-wal
+.repodocs/store.db
+.repodocs/store.db-shm
+.repodocs/store.db-wal
