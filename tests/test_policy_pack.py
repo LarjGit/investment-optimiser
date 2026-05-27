@@ -62,6 +62,31 @@ def test_dump_policy_pack_json_is_canonical_and_round_trips() -> None:
     assert json.loads(dumped_policy_pack) == load_policy_pack("v1")
 
 
+def test_load_policy_pack_v2_exposes_split_forward_inflation_contract() -> None:
+    policy_pack = load_policy_pack("v2")
+
+    assert policy_pack["policy_version"] == "v2"
+
+    fields_by_key = {
+        field["key"]: field for field in policy_pack["shared_assumption_schema"]["fields"]
+    }
+
+    assert "expected_rpi_pct" not in fields_by_key
+    assert fields_by_key["rpi_assumption_pre_2030_pct"]["label"] == (
+        "Expected RPI assumption to January 2030"
+    )
+    assert fields_by_key["rpi_assumption_pre_2030_pct"]["default"] == 3.0
+    assert fields_by_key["rpi_assumption_post_2030_pct"]["label"] == (
+        "Expected post-2030 RPI or CPIH-aligned assumption"
+    )
+    assert fields_by_key["rpi_assumption_post_2030_pct"]["default"] == 3.0
+
+
+def test_load_policy_pack_defaults_to_active_v2_contract() -> None:
+    assert load_policy_pack()["policy_version"] == "v2"
+    assert load_policy_pack("v1")["policy_version"] == "v1"
+
+
 def test_load_policy_pack_reads_current_pack_contents_each_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,4 +130,4 @@ def test_load_policy_pack_reads_current_pack_contents_each_time(
 
 def test_load_policy_pack_rejects_unknown_version() -> None:
     with pytest.raises(ValueError, match="Unsupported policy pack version"):
-        load_policy_pack("v2")
+        load_policy_pack("v3")

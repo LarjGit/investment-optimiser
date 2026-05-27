@@ -6,10 +6,11 @@ import json
 from typing import Any
 
 
-DEFAULT_POLICY_PACK_VERSION = "v1"
+DEFAULT_POLICY_PACK_VERSION = "v2"
 
 _POLICY_PACK_DATA_FILES: dict[str, str] = {
-    DEFAULT_POLICY_PACK_VERSION: "policy_pack_v1.json",
+    "v1": "policy_pack_v1.json",
+    DEFAULT_POLICY_PACK_VERSION: "policy_pack_v2.json",
 }
 
 
@@ -38,10 +39,10 @@ def _load_policy_pack_once(version: str) -> dict[str, Any]:
     return policy_pack
 
 
-def load_policy_pack(version: str = "v1") -> dict[str, Any]:
+def load_policy_pack(version: str = DEFAULT_POLICY_PACK_VERSION) -> dict[str, Any]:
     return deepcopy(_load_policy_pack_once(version))
 
 
-def dump_policy_pack_json(version: str = "v1") -> str:
+def dump_policy_pack_json(version: str = DEFAULT_POLICY_PACK_VERSION) -> str:
     policy_pack = _load_policy_pack_once(version)
     return json.dumps(policy_pack, indent=2, sort_keys=True) + "\n"
