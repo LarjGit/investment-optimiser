@@ -433,3 +433,53 @@ def test_portfolio_tab_shows_last_successful_market_refresh_after_failure(
         "Last refresh" in value and "2026-05-18 09:00 UTC" in value
         for value in caption_values
     )
+
+
+def test_sidebar_il_section_warns_when_no_observed_data(tmp_path: Path) -> None:
+    """Fresh empty DB → sidebar IL section shows a warning about missing D10C data."""
+    db_path = tmp_path / "investment_optimiser.db"
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {
+        "db": {"url": f"sqlite:///{db_path.as_posix()}"}
+    }
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    sidebar_warning_texts = [w.value.lower() for w in app.sidebar.warning]
+    assert any(
+        "observed" in t or "inflation" in t or "d10c" in t or "refresh" in t
+        for t in sidebar_warning_texts
+    ), f"Expected an observed-data warning in the sidebar, got: {sidebar_warning_texts}"
+
+
+def test_sidebar_il_section_labels_forward_assumptions_as_user_authored(
+    tmp_path: Path,
+) -> None:
+    """The forward inflation number inputs should survive alongside the new observed panel."""
+    db_path = tmp_path / "investment_optimiser.db"
+    app_path = Path(__file__).resolve().parent.parent / "app.py"
+
+    app = AppTest.from_file(str(app_path))
+    app.secrets["connections"] = {
+        "db": {"url": f"sqlite:///{db_path.as_posix()}"}
+    }
+
+    app.run(timeout=10)
+
+    assert not app.exception
+    # Both forward-assumption number inputs must still be present.
+    number_inputs_by_label = {w.label: w for w in app.number_input}
+    assert "Expected RPI assumption to January 2030 (%)" in number_inputs_by_label
+    assert (
+        "Expected post-2030 RPI or CPIH-aligned assumption (%)"
+        in number_inputs_by_label
+    )
+    # The sidebar caption should mention "Forward" to distinguish the section.
+    sidebar_caption_texts = [c.value for c in app.sidebar.caption]
+    assert any(
+        "forward" in t.lower() or "assumption" in t.lower()
+        for t in sidebar_caption_texts
+    ), f"Expected 'Forward' caption in sidebar, got: {sidebar_caption_texts}"

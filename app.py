@@ -17,6 +17,10 @@ from functools import partial
 from investment_optimiser.db import initialize_database, sqlite_path_from_url
 from investment_optimiser.dmo import dmo_handler
 from investment_optimiser.dmo_d10c import dmo_d10c_handler
+from investment_optimiser.il_presentation import (
+    render_il_exclusion_reasons,
+    render_observed_inflation_sidebar_panel,
+)
 from investment_optimiser.gilt_analytics import gilt_analytics_handler
 from investment_optimiser.lse_gilt_prices import lse_gilt_prices_handler
 from investment_optimiser.non_gilt_reference import non_gilt_reference_handler
@@ -450,6 +454,32 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
 
     gilt_candidate_warnings = _build_gilt_candidate_warnings(gilt_ranking_rows, gilt_ref_count_rows)
 
+    freshness_rows = connection.query(
+        """
+        SELECT
+            MAX(fetched_at) AS fetched_at,
+            provider,
+            MAX(confidence_tier) AS confidence_tier,
+            MAX(is_degraded) AS is_degraded,
+            COUNT(DISTINCT isin) AS gilt_count
+        FROM observed_inflation_cache
+        WHERE provider = 'DMO_D10C'
+        GROUP BY provider
+        """,
+        ttl=60,
+    )
+    observed_inflation_freshness: dict | None = None
+    if not freshness_rows.empty:
+        row = freshness_rows.iloc[0]
+        if pd.notna(row["fetched_at"]):
+            observed_inflation_freshness = {
+                "fetched_at": str(row["fetched_at"]),
+                "provider": str(row["provider"]),
+                "confidence_tier": str(row["confidence_tier"]),
+                "is_degraded": bool(row["is_degraded"]),
+                "gilt_count": int(row["gilt_count"]) if pd.notna(row["gilt_count"]) else None,
+            }
+
     return {
         "summary": summary_row,
         "active_signals": active_signal_rows,
@@ -463,6 +493,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         "yield_curve_history": yield_curve_history,
         "duration_liquidity_rows": duration_liquidity_rows,
         "current_baseline": current_baseline,
+        "observed_inflation_freshness": observed_inflation_freshness,
     }
 
 
@@ -811,6 +842,7 @@ def render_sidebar(
     database_url: str,
     portfolio_csv_path: Path,
 ) -> None:
+    observed_freshness = state.get("observed_inflation_freshness")
     with st.sidebar:
         st.subheader("Investment Optimiser")
         st.caption("SIPP decision support")
@@ -846,6 +878,9 @@ def render_sidebar(
         )
         st.divider()
         st.caption("Index-Linked Gilts")
+        st.caption("Observed inflation data")
+        render_observed_inflation_sidebar_panel(observed_freshness)
+        st.caption("Forward inflation assumptions")
         _initialise_forward_inflation_session_state()
         st.number_input(
             "Expected RPI assumption to January 2030 (%)",
@@ -855,9 +890,8 @@ def render_sidebar(
             key=RPI_ASSUMPTION_PRE_2030_KEY,
             help=(
                 "User-authored forward inflation assumption for the period up to January "
-                "2030. Set either forward inflation field to 0 to exclude IL gilts from "
-                "yield ranking and optimisation until the full split-assumption analytics "
-                "slice lands."
+                "2030. Used alongside observed D10C index data to derive nominal-equivalent "
+                "GRY for IL gilts."
             ),
         )
         st.number_input(
@@ -868,9 +902,8 @@ def render_sidebar(
             key=RPI_ASSUMPTION_POST_2030_KEY,
             help=(
                 "User-authored forward inflation assumption for the post-2030 regime "
-                "after the planned RPI/CPIH alignment. Set either forward inflation field "
-                "to 0 to exclude IL gilts from yield ranking and optimisation until the "
-                "full split-assumption analytics slice lands."
+                "after the planned RPI/CPIH alignment. Used alongside observed D10C "
+                "index data to derive nominal-equivalent GRY for long-dated IL gilts."
             ),
         )
         st.divider()
@@ -1259,13 +1292,11 @@ def render_gilt_ranking_card(
 
     _render_gilt_switch_table(df, held_isins, holdings_df, policy)
 
-    # Show per-gilt exclusion reasons for any IL gilts that could not be resolved
-    if not il_df.empty and "il_exclusion_reason" in il_df.columns:
-        for reason in il_df["il_exclusion_reason"].dropna():
-            st.info(str(reason))
+    render_il_exclusion_reasons(il_df)
     st.caption(
-        "Ranked by GRY descending. IL gilts use nominal-equivalent GRY derived from the active "
-        "forward inflation assumptions. Held = currently in your portfolio."
+        "Ranked by GRY descending. IL gilts are ranked by nominal-equivalent GRY derived from "
+        "observed DMO D10C index data and your forward inflation assumptions. "
+        "Held = currently in your portfolio."
     )
 
 
