@@ -135,7 +135,12 @@ def _initialise_forward_inflation_session_state() -> None:
 
 
 def _active_forward_inflation_bridge_pct() -> float | None:
-    """Temporary scalar bridge using the lower forward assumption until downstream IL code is split-aware."""
+    """Scalar bridge for dashboard display only — returns the lower of the two forward assumptions.
+
+    Used only for conditional display logic (showing/hiding IL gilt results on the dashboard).
+    The analytics call path passes the two forward assumptions separately; do not use this
+    function to feed ``gilt_analytics_handler``.
+    """
     _initialise_forward_inflation_session_state()
 
     pre_2030 = float(st.session_state.get(RPI_ASSUMPTION_PRE_2030_KEY, 0.0))
@@ -736,6 +741,7 @@ def render_refresh_controls(
 
     if refresh_clicked:
         with st.spinner("Refreshing market data...", show_time=True):
+            _initialise_forward_inflation_session_state()
             coordinator = RefreshCoordinator(
                 portfolio_csv_path=portfolio_csv_path,
                 source_handlers={
@@ -747,7 +753,8 @@ def render_refresh_controls(
                     "lse_gilt_prices": lse_gilt_prices_handler,
                     "gilt_analytics": partial(
                         gilt_analytics_handler,
-                        rpi_assumption_pct=_active_forward_inflation_bridge_pct(),
+                        forward_rpi_pre_2030_pct=st.session_state.get(RPI_ASSUMPTION_PRE_2030_KEY),
+                        forward_rpi_post_2030_pct=st.session_state.get(RPI_ASSUMPTION_POST_2030_KEY),
                     ),
                     "yfinance_equities": yfinance_equities_handler,
                 },
