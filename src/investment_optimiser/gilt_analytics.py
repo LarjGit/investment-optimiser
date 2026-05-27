@@ -8,6 +8,12 @@ import pandas as pd
 from dateutil.relativedelta import relativedelta
 from scipy import optimize
 
+from investment_optimiser.dmo_d10c import get_latest_observed_inflation
+from investment_optimiser.observed_inflation_resolver import (
+    InflationResolutionError,
+    resolve_il_contract,
+)
+
 try:
     from govuk_bank_holidays.bank_holidays import BankHolidays
 
@@ -305,7 +311,8 @@ def _derive_benchmark_yields(
 
 def gilt_analytics_handler(
     connection: sqlite3.Connection,
-    rpi_assumption_pct: float | None = None,
+    forward_rpi_pre_2030_pct: float | None = None,
+    forward_rpi_post_2030_pct: float | None = None,
 ) -> list[str]:
     cache_date = date.today().isoformat()
     settlement = settlement_date_for(date.today())
@@ -342,7 +349,16 @@ def gilt_analytics_handler(
             updates,
         )
 
-    if rpi_assumption_pct:
+    if (
+        forward_rpi_pre_2030_pct is not None
+        and forward_rpi_pre_2030_pct > 0.0
+        and forward_rpi_post_2030_pct is not None
+        and forward_rpi_post_2030_pct > 0.0
+    ):
+        observed_by_isin = {
+            row["isin"]: row for row in get_latest_observed_inflation(connection)
+        }
+
         il_rows = connection.execute(
             """
             SELECT gpc.isin, gpc.clean_price_gbp, gpc.coupon_pct, gpc.maturity_date
@@ -357,7 +373,21 @@ def gilt_analytics_handler(
         il_updates: list[tuple[float, float, str, str]] = []
         for isin, clean_price, coupon_pct, maturity_date_str in il_rows:
             maturity = date.fromisoformat(maturity_date_str)
-            result = compute_real_gry(clean_price, coupon_pct, maturity, settlement, rpi_assumption_pct)
+            contract = resolve_il_contract(
+                isin=isin,
+                settlement_date=settlement,
+                maturity_date=maturity,
+                observed_row=observed_by_isin.get(isin),
+                forward_rpi_pre_2030_pct=forward_rpi_pre_2030_pct,
+                forward_rpi_post_2030_pct=forward_rpi_post_2030_pct,
+            )
+            if isinstance(contract, InflationResolutionError):
+                warnings.append(contract.warning)
+                continue
+            result = compute_real_gry(
+                clean_price, coupon_pct, maturity, settlement,
+                contract.effective_forward_rpi_pct,
+            )
             if result == (None, None):
                 warnings.append(f"{isin} real GRY solve failed: no convergence")
                 continue

@@ -9,6 +9,36 @@ import pytest
 from investment_optimiser.db import initialize_database
 from investment_optimiser.gilt_analytics import compute_gry, compute_real_gry, gilt_analytics_handler
 
+
+def _seed_observed_inflation_row(
+    connection: sqlite3.Connection,
+    *,
+    isin: str,
+    settlement_date: str,
+    index_ratio: float = 1.46186,
+    reference_rpi: float = 408.2,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO observed_inflation_cache (
+            isin, settlement_date, instrument_name,
+            index_ratio, reference_rpi,
+            provider, fetched_at, confidence_tier, is_degraded
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            isin,
+            settlement_date,
+            "Test IL Gilt",
+            index_ratio,
+            reference_rpi,
+            "DMO_D10C",
+            "2026-05-27T08:00:00Z",
+            "authoritative",
+            0,
+        ),
+    )
+
 _SETTLEMENT = date(2026, 5, 20)
 
 
@@ -301,10 +331,19 @@ def test_il_gilt_analytics_handler_fills_real_gry_when_rpi_present(tmp_path: Pat
             coupon_pct=2.0,
             maturity_date="2031-05-07",
         )
+        _seed_observed_inflation_row(
+            connection,
+            isin="GB00B4RVKJ67",
+            settlement_date=date.today().isoformat(),
+        )
         connection.commit()
 
     with sqlite3.connect(db_path) as connection:
-        warnings = gilt_analytics_handler(connection, rpi_assumption_pct=3.0)
+        warnings = gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=3.0,
+        )
         row = connection.execute(
             "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
             ("GB00B4RVKJ67",),
@@ -355,5 +394,136 @@ def test_il_gilt_analytics_handler_skips_il_gilts_when_no_rpi(tmp_path: Path) ->
             ("GB00B4RVKJ67",),
         ).fetchone()
 
+    assert row[0] is None
+    assert row[1] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests 9–11: IL handler with resolved inflation contract
+# ---------------------------------------------------------------------------
+
+
+def test_gilt_analytics_handler_fills_nominal_equivalent_for_il_gilt_with_observed_data(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        _seed_observed_inflation_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            settlement_date=date.today().isoformat(),
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        warnings = gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        row = connection.execute(
+            "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
+            ("GB00BZ1NTB69",),
+        ).fetchone()
+
+    assert warnings == []
+    assert row[0] is not None, "real_gry_pct should be populated"
+    assert row[1] is not None, "nominal_equivalent_gry_pct should be populated"
+
+
+def test_gilt_analytics_handler_warns_on_il_gilt_missing_from_observed_cache(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        # No observed_inflation_cache row seeded
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        warnings = gilt_analytics_handler(
+            connection,
+            forward_rpi_pre_2030_pct=3.0,
+            forward_rpi_post_2030_pct=2.5,
+        )
+        row = connection.execute(
+            "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
+            ("GB00BZ1NTB69",),
+        ).fetchone()
+
+    assert len(warnings) == 1
+    assert "GB00BZ1NTB69" in warnings[0]
+    assert row[0] is None, "real_gry_pct should remain NULL"
+    assert row[1] is None, "nominal_equivalent_gry_pct should remain NULL"
+
+
+def test_gilt_analytics_handler_skips_il_gilts_when_forward_assumptions_absent(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "investment_optimiser.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+
+    with sqlite3.connect(db_path) as connection:
+        _seed_reference_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+            instrument_type="Index-linked",
+        )
+        _seed_price_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            clean_price=100.0,
+            coupon_pct=0.125,
+            maturity_date="2028-03-22",
+        )
+        _seed_observed_inflation_row(
+            connection,
+            isin="GB00BZ1NTB69",
+            settlement_date=date.today().isoformat(),
+        )
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        # No forward assumptions supplied
+        warnings = gilt_analytics_handler(connection)
+        row = connection.execute(
+            "SELECT real_gry_pct, nominal_equivalent_gry_pct FROM gilt_price_cache WHERE isin = ?",
+            ("GB00BZ1NTB69",),
+        ).fetchone()
+
+    assert warnings == [], "No warnings expected when IL processing is simply not attempted"
     assert row[0] is None
     assert row[1] is None
