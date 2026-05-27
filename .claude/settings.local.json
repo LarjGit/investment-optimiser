@@ -26,7 +26,9 @@
       "Bash(git remote *)",
       "WebFetch(domain:nick3499.medium.com)",
       "Bash(git commit -m 'docs: add solutions note for DMO D10C URL and data shape *)",
-      "Bash(git commit -m 'chore: allow git and medium.com in project settings permissions *)"
+      "Bash(git commit -m 'chore: allow git and medium.com in project settings permissions *)",
+      "Bash(git push *)",
+      "Bash(gh issue *)"
     ]
   }
 }
