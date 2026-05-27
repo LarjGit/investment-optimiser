@@ -242,14 +242,15 @@ def test_build_universe_sorted_gry_descending_nulls_last(db: sqlite3.Connection)
 # --- IL gilt inclusion with RPI assumption ---
 
 
-def test_fetch_gilt_ranking_includes_il_gilts_with_rpi(db: sqlite3.Connection) -> None:
+def test_fetch_gilt_ranking_includes_il_gilts_when_nominal_equivalent_gry_is_set(db: sqlite3.Connection) -> None:
+    """IL gilts with nominal_equivalent_gry_pct appear in ranking without any rpi_assumption_pct argument."""
     _seed_reference(db, isin="GB00B54HL0K3", instrument_name="Conventional 4% 2031", instrument_type="Conventional", maturity_date="2031-06-07")
     _seed_reference(db, isin="GB00B4RVKJ67", instrument_name="IL 0.125% 2031", instrument_type="Index-linked", maturity_date="2031-06-07")
     _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0430, modified_duration_years=4.5)
     _seed_price(db, isin="GB00B4RVKJ67", nominal_equivalent_gry_pct=0.0503)
     db.commit()
 
-    df = fetch_gilt_ranking(db, rpi_assumption_pct=3.0)
+    df = fetch_gilt_ranking(db)
 
     assert len(df) == 2
     isins = list(df["isin"])
@@ -257,14 +258,15 @@ def test_fetch_gilt_ranking_includes_il_gilts_with_rpi(db: sqlite3.Connection) -
     assert "GB00B4RVKJ67" in isins
 
 
-def test_build_universe_includes_il_gilt_with_rpi(db: sqlite3.Connection) -> None:
+def test_build_universe_includes_il_gilt_when_nominal_equivalent_gry_is_set(db: sqlite3.Connection) -> None:
+    """IL gilts with nominal_equivalent_gry_pct appear in candidate universe without rpi_assumption_pct."""
     _seed_reference(db, isin="GB00B54HL0K3", instrument_type="Conventional", maturity_date="2031-06-07")
     _seed_reference(db, isin="GB00B4RVKJ67", instrument_type="Index-linked", maturity_date="2031-06-07")
     _seed_price(db, isin="GB00B54HL0K3", gry_pct=0.0430, modified_duration_years=4.5, maturity_date="2031-06-07")
     _seed_price(db, isin="GB00B4RVKJ67", nominal_equivalent_gry_pct=0.0503, maturity_date="2031-06-07")
     db.commit()
 
-    df, warnings = build_gilt_candidate_universe(db, rpi_assumption_pct=3.0)
+    df, warnings = build_gilt_candidate_universe(db)
 
     assert len(df) == 2
     isins = list(df["isin"])
