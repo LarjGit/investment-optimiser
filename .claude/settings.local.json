@@ -28,7 +28,14 @@
       "Bash(git commit -m 'docs: add solutions note for DMO D10C URL and data shape *)",
       "Bash(git commit -m 'chore: allow git and medium.com in project settings permissions *)",
       "Bash(git push *)",
-      "Bash(gh issue *)"
+      "Bash(gh issue *)",
+      "Bash(xargs grep -l \"IL\\\\|Index-linked\\\\|inflation\\\\|resolve_il_contract\")",
+      "Bash(git commit -m 'feat\\(migrations\\): add il_exclusion_reason column to gilt_price_cache *)",
+      "Bash(git commit -m 'feat\\(il-analytics\\): always run IL loop; persist exclusion reasons *)",
+      "Bash(git commit -m 'refactor\\(gilt-signals\\): consolidate duplicate SQL; drop rpi_assumption_pct params *)",
+      "Bash(git commit -m 'refactor\\(app\\): remove forward-inflation bridge gate; show per-gilt exclusion reasons *)",
+      "Bash(git commit -m 'docs: archive implementation-status v1; add PRD and solutions note *)",
+      "Bash(git commit -m 'chore: allow IL-file grep pattern in project settings *)"
     ]
   }
 }
