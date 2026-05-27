@@ -35,7 +35,9 @@
       "Bash(git commit -m 'refactor\\(gilt-signals\\): consolidate duplicate SQL; drop rpi_assumption_pct params *)",
       "Bash(git commit -m 'refactor\\(app\\): remove forward-inflation bridge gate; show per-gilt exclusion reasons *)",
       "Bash(git commit -m 'docs: archive implementation-status v1; add PRD and solutions note *)",
-      "Bash(git commit -m 'chore: allow IL-file grep pattern in project settings *)"
+      "Bash(git commit -m 'chore: allow IL-file grep pattern in project settings *)",
+      "Bash(Get-ChildItem -Path \"C:\\\\workbench\\\\code\\\\investment-optimiser\" -Directory)",
+      "Bash(Select-Object -ExpandProperty Name)"
     ]
   }
 }
