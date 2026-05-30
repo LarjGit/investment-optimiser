@@ -54,17 +54,20 @@ def run_scenarios(
 
 
 def _build_gilt_lookup(gilt_ref_df: pd.DataFrame) -> dict[str, dict]:
-    """Return {tidm: {coupon_pct, gry_pct, maturity_date}} for conventional gilts."""
+    """Return {tidm: {coupon_pct, gry_pct, maturity_date, instrument_type, real_gry_pct}}."""
     if gilt_ref_df.empty or "tidm" not in gilt_ref_df.columns:
         return {}
     lookup: dict[str, dict] = {}
     for row in gilt_ref_df.to_dict("records"):
         tidm = row.get("tidm")
         if tidm and pd.notna(tidm):
+            real_gry_raw = row.get("real_gry_pct")
             lookup[str(tidm)] = {
                 "coupon_pct": row.get("coupon_pct"),
                 "gry_pct": row.get("gry_pct"),
                 "maturity_date": row.get("maturity_date"),
+                "instrument_type": row.get("instrument_type", "Conventional"),
+                "real_gry_pct": None if pd.isna(real_gry_raw) else float(real_gry_raw),
             }
     return lookup
 
@@ -80,7 +83,10 @@ def _reprice_holding(
 ) -> dict:
     symbol = str(row.get("symbol", ""))
     asset_type = str(row.get("asset_type") or "")
-    current_value = float(row.get("market_value_gbp") or 0.0)
+    # executable_df uses proposed_value_gbp; enriched_holdings_df uses market_value_gbp
+    current_value = float(
+        row.get("market_value_gbp") or row.get("proposed_value_gbp") or 0.0
+    )
     bucket_id = str(row.get("bucket_id") or "")
 
     scenario_value, model_status, notes = _compute_scenario_value(
@@ -118,7 +124,7 @@ def _compute_scenario_value(
         return _reprice_conventional_gilt(row, current_value, shocks, gilt_lookup, settlement)
 
     if asset_type == "gilt_index_linked":
-        return current_value, "unmodelled_held_flat", "No RPI assumption; IL gilt held at spot."
+        return _reprice_il_gilt(row, current_value, shocks, gilt_lookup, settlement)
 
     if asset_type == "mmf":
         return current_value, "held_flat", "MMF capital value flat; income changes only."
@@ -132,6 +138,55 @@ def _compute_scenario_value(
         return current_value * (1.0 + shock_pct / 100.0), "exact", f"Diversifier: {shock_pct:+.1f}% shock."
 
     return current_value, "unmodelled_held_flat", f"No scenario model for asset_type '{asset_type}'."
+
+
+def _reprice_il_gilt(
+    row: dict,
+    current_value: float,
+    shocks: dict,
+    gilt_lookup: dict[str, dict],
+    settlement: date,
+) -> tuple[float, str, str]:
+    """Reprice an IL gilt by shocking its real yield.
+
+    Uses the ``real_gry_pct`` computed by the analytics handler (which resolves the
+    shared observed-inflation contract) as the baseline, then applies the scenario's
+    ``real_yield_parallel_bps`` shock.  Proportional repricing avoids the need for
+    ``index_ratio``, which cancels in the baseline/scenario price ratio.
+    """
+    symbol = str(row.get("symbol", ""))
+    ref = gilt_lookup.get(symbol)
+    if ref is None:
+        return current_value, "unmodelled_held_flat", "IL gilt not found in reference data; held at spot."
+
+    real_gry_pct = ref.get("real_gry_pct")
+    if real_gry_pct is None:
+        return current_value, "unmodelled_held_flat", "IL gilt real GRY unavailable; held at spot."
+
+    coupon_pct = ref.get("coupon_pct")
+    maturity_date_str = ref.get("maturity_date")
+    if coupon_pct is None or maturity_date_str is None:
+        return current_value, "unmodelled_held_flat", "Missing IL gilt reference data; held at spot."
+
+    try:
+        maturity = date.fromisoformat(str(maturity_date_str))
+    except (ValueError, TypeError):
+        return current_value, "unmodelled_held_flat", "Invalid IL gilt maturity date; held at spot."
+
+    real_shock_bps = shocks.get("real_yield_parallel_bps", 0.0)
+    # IL real yields are small (typically −0.5% to +2.5%), so bps must be converted
+    # correctly (÷10000) to avoid pushing shocked yields into non-physical territory.
+    shocked_real_gry = real_gry_pct + real_shock_bps / 10000.0
+
+    baseline_price = clean_price_from_gry(real_gry_pct, float(coupon_pct), maturity, settlement)
+    scenario_price = clean_price_from_gry(shocked_real_gry, float(coupon_pct), maturity, settlement)
+
+    if baseline_price is None or baseline_price <= 0 or scenario_price is None:
+        return current_value, "unmodelled_held_flat", "IL gilt price solve failed; held at spot."
+
+    scenario_value = current_value * (scenario_price / baseline_price)
+    notes = f"Real GRY shock {real_shock_bps:+.1f}bps (real yield parallel)."
+    return scenario_value, "exact", notes
 
 
 def _reprice_conventional_gilt(
@@ -164,14 +219,18 @@ def _reprice_conventional_gilt(
     steepener_fraction = max(0.0, min(1.0, (years_to_maturity - 2.0) / 8.0))
     total_shock_bps = parallel_bps + steepener_bps * steepener_fraction
 
-    scenario_gry = float(baseline_gry) + total_shock_bps / 100.0
+    scenario_gry = float(baseline_gry) + total_shock_bps / 10000.0
+
+    # Proportional repricing: ratio of scenario price to baseline price, applied to
+    # current market value.  This mirrors the IL gilt approach and avoids any
+    # dependency on the qty / face-value column (which varies by caller).
+    baseline_price = clean_price_from_gry(float(baseline_gry), float(coupon_pct), maturity, settlement)
     scenario_price = clean_price_from_gry(scenario_gry, float(coupon_pct), maturity, settlement)
 
-    if scenario_price is None:
+    if baseline_price is None or baseline_price <= 0 or scenario_price is None:
         return current_value, "unmodelled_held_flat", "Price solve failed; held at spot."
 
-    qty = float(row.get("qty") or 0.0)
-    scenario_value = qty * scenario_price / 100.0
+    scenario_value = current_value * (scenario_price / baseline_price)
     notes = (
         f"GRY shock {total_shock_bps:+.1f}bps "
         f"({parallel_bps:+.1f} parallel, {steepener_bps * steepener_fraction:+.1f} steepener)."

@@ -22,6 +22,8 @@ def _gilt_ref_df(
     maturity_date: str = "2027-03-07",
     gry_pct: float = 0.04,
     modified_duration_years: float = 1.5,
+    instrument_type: str = "Conventional",
+    real_gry_pct: float | None = None,
 ) -> pd.DataFrame:
     return pd.DataFrame([{
         "tidm": tidm,
@@ -31,6 +33,8 @@ def _gilt_ref_df(
         "gry_pct": gry_pct,
         "modified_duration_years": modified_duration_years,
         "clean_price_gbp": 100.0,
+        "instrument_type": instrument_type,
+        "real_gry_pct": real_gry_pct,
     }])
 
 
@@ -250,6 +254,58 @@ class TestGiltRepricing:
         assert pnl_2x < pnl_1x  # both negative; 2x is more negative
         assert abs(pnl_2x) > abs(pnl_1x)
 
+    def test_conventional_gilt_repriced_without_qty_column(self):
+        """Regression: enriched_holdings_df from DB has 'quantity' not 'qty'; repricing must
+        not depend on the qty column (it used to silently return £0 pnl)."""
+        holdings = pd.DataFrame([{
+            "symbol": "TR27",
+            "name": "4¼% Treasury Gilt 2027",
+            "asset_type": "gilt_conventional",
+            "market_value_gbp": 3435.22,
+            "bucket_id": "short_duration_nominal_gilts",
+            # qty / quantity intentionally absent
+        }])
+        gilt_ref = _gilt_ref_df(gry_pct=0.04, maturity_date="2027-03-07")
+        policy = _minimal_policy()
+        results = run_scenarios(holdings, pd.DataFrame(), policy, gilt_ref,
+                                reference_date=_SETTLEMENT)
+        rec = results[0]
+        assert rec["model_status"] == "exact"
+        assert rec["scenario_value_gbp"] < rec["current_value_gbp"], (
+            "gilt should lose value in a rates-up scenario, not be zero"
+        )
+        assert rec["pnl_gbp"] < 0
+        # Sanity: loss should be < 10% for a short gilt with 100bps shock
+        assert rec["pnl_gbp"] > -rec["current_value_gbp"] * 0.10
+
+    def test_executable_df_uses_proposed_value_gbp(self):
+        """Regression: executable_df has proposed_value_gbp not market_value_gbp; the
+        recommended portfolio must not be silently reported as all-zeros."""
+        current_holdings = pd.DataFrame([_holdings_row(
+            symbol="ADM", name="Admiral", asset_type="equity",
+            market_value_gbp=3828.0, maturity_date=None, bucket_id="equities",
+        )])
+        executable = pd.DataFrame([{
+            "symbol": "ADM",
+            "isin": None,
+            "bucket_id": "equities",
+            "asset_type": "equity",
+            "proposed_value_gbp": 3500.0,
+            # no market_value_gbp column
+        }])
+        gilt_ref = _gilt_ref_df()
+        policy = _minimal_policy()
+        results = run_scenarios(current_holdings, executable, policy, gilt_ref,
+                                reference_date=_SETTLEMENT)
+        exec_recs = [r for r in results if r["portfolio_state"] == "executable_recommended"]
+        assert len(exec_recs) == 1
+        rec = exec_recs[0]
+        assert rec["current_value_gbp"] == pytest.approx(3500.0), (
+            "proposed_value_gbp should be used as the value basis for the recommended portfolio"
+        )
+        assert rec["scenario_value_gbp"] > 0
+        assert rec["pnl_gbp"] < 0  # -5% equity shock → negative PnL
+
 
 class TestNonGiltRepricing:
     def test_equity_drawdown_applies_price_shock(self):
@@ -325,6 +381,93 @@ class TestNonGiltRepricing:
             maturity_date="2033-07-31",
         )])
         gilt_ref = _gilt_ref_df()
+        policy = _minimal_policy()
+        results = run_scenarios(holdings, pd.DataFrame(), policy, gilt_ref,
+                                reference_date=_SETTLEMENT)
+        rec = results[0]
+        assert rec["model_status"] == "unmodelled_held_flat"
+        assert rec["scenario_value_gbp"] == rec["current_value_gbp"]
+
+
+# ---------------------------------------------------------------------------
+# run_scenarios — IL gilt repricing
+# ---------------------------------------------------------------------------
+
+class TestILGiltRepricing:
+    def test_real_yield_shock_reduces_il_gilt_value(self):
+        """IL gilt with real_gry_pct: positive real yield shock → value falls, status 'exact'."""
+        holdings = pd.DataFrame([_holdings_row(
+            symbol="TG33", name="0.875% Index-linked 2033",
+            asset_type="gilt_index_linked",
+            qty=10000.0,
+            market_value_gbp=12500.0,
+            maturity_date="2033-07-31",
+        )])
+        gilt_ref = _gilt_ref_df(
+            tidm="TG33",
+            coupon_pct=0.875,
+            maturity_date="2033-07-31",
+            instrument_type="Index-linked",
+            real_gry_pct=0.002,
+        )
+        policy = _minimal_policy()
+        results = run_scenarios(holdings, pd.DataFrame(), policy, gilt_ref,
+                                reference_date=_SETTLEMENT)
+        rec = results[0]
+        assert rec["model_status"] == "exact"
+        assert rec["scenario_value_gbp"] < rec["current_value_gbp"]
+        assert rec["pnl_gbp"] < 0
+
+    def test_il_gilt_ignores_nominal_curve_shock(self):
+        """IL gilt is unaffected when only the nominal curve is shocked (real_yield_parallel_bps=0)."""
+        holdings = pd.DataFrame([_holdings_row(
+            symbol="TG33", name="0.875% Index-linked 2033",
+            asset_type="gilt_index_linked",
+            qty=10000.0,
+            market_value_gbp=12500.0,
+            maturity_date="2033-07-31",
+        )])
+        gilt_ref = _gilt_ref_df(
+            tidm="TG33",
+            coupon_pct=0.875,
+            maturity_date="2033-07-31",
+            instrument_type="Index-linked",
+            real_gry_pct=0.002,
+        )
+        policy = _minimal_policy(scenarios=[{
+            "id": "rates_up_nominal_only",
+            "label": "Nominal rates up, real rates flat",
+            "base_shocks": {
+                "nominal_curve_parallel_bps": 200.0,
+                "nominal_curve_2s10s_steepener_bps": 0.0,
+                "real_yield_parallel_bps": 0.0,
+                "listed_risk_assets_pct": 0.0,
+                "diversifiers_and_manual_pct": 0.0,
+                "cash_mmf_pct": 0.0,
+            },
+        }])
+        results = run_scenarios(holdings, pd.DataFrame(), policy, gilt_ref,
+                                reference_date=_SETTLEMENT)
+        rec = results[0]
+        assert rec["model_status"] == "exact"
+        assert rec["scenario_value_gbp"] == pytest.approx(rec["current_value_gbp"], rel=1e-6)
+
+    def test_il_gilt_missing_real_gry_is_held_flat(self):
+        """IL gilt present in reference but without real_gry_pct → unmodelled_held_flat."""
+        holdings = pd.DataFrame([_holdings_row(
+            symbol="TG33", name="0.875% Index-linked 2033",
+            asset_type="gilt_index_linked",
+            qty=10000.0,
+            market_value_gbp=12500.0,
+            maturity_date="2033-07-31",
+        )])
+        gilt_ref = _gilt_ref_df(
+            tidm="TG33",
+            coupon_pct=0.875,
+            maturity_date="2033-07-31",
+            instrument_type="Index-linked",
+            real_gry_pct=None,  # analytics not yet resolved
+        )
         policy = _minimal_policy()
         results = run_scenarios(holdings, pd.DataFrame(), policy, gilt_ref,
                                 reference_date=_SETTLEMENT)
