@@ -7,13 +7,24 @@ from typing import Any
 import pandas as pd
 
 from investment_optimiser.allocation_runs import ALLOCATION_RUN_SCHEMA_VERSION, AllocationRunRecord
+from investment_optimiser.bucket_assignment import assign_bucket
 from investment_optimiser.constraint_explanations import explain_binding_constraints
-from investment_optimiser.friction_gate import apply_gate_to_proposed_state, gate_trades
-from investment_optimiser.holdings_translator import translate_bucket_targets_to_holdings
 from investment_optimiser.lp_solver import solve_bucket_weights
 from investment_optimiser.risk_gate import RiskGatedTrade, apply_risk_gate_to_proposed_state, risk_gate_trades
 from investment_optimiser.scenario_engine import run_scenarios
-from investment_optimiser.trade_construction import construct_trades
+from investment_optimiser.security_selection import select_trades
+
+# Minimum GRY advantage (in decimal) for a candidate to qualify as a switch opportunity.
+# Matches the threshold used in app.py:_build_switch_rows so both subsystems agree.
+_SWITCH_GAP_THRESHOLD = 0.001   # 10 basis points
+
+# Maximum candidates per bucket when a bucket has no current gilt holdings.
+_MAX_EMPTY_BUCKET_CANDIDATES = 3
+
+_INSTRUMENT_TO_ASSET_TYPE: dict[str, str] = {
+    "Conventional": "gilt_conventional",
+    "Index-linked": "gilt_index_linked",
+}
 
 
 _REGIME_STATE_DEFAULT = "normal"
@@ -46,9 +57,7 @@ def build_lp_recommendation(
     )
 
     current_weights = _current_weights(enriched_holdings_df, baseline_weights, total_portfolio)
-    gilt_prices = _gilt_prices(gilt_ranking_df)
     maturity_by_isin = _maturity_by_isin(gilt_ranking_df, today)
-    yield_improvement_bps = _yield_improvement_bps(gilt_ranking_df)
     score_coefficients = _score_coefficients(baseline_weights, current_weights)
 
     lp_result = solve_bucket_weights(
@@ -91,23 +100,27 @@ def build_lp_recommendation(
             warnings=lp_result.notes,
         )
 
-    translation = translate_bucket_targets_to_holdings(
-        bucket_target_weights=lp_result.target_weights,
-        enriched_holdings_df=enriched_holdings_df,
-        total_portfolio_value_gbp=total_portfolio,
-        gilt_candidates_df=gilt_ranking_df if not gilt_ranking_df.empty else None,
-        reference_date=today,
+    filtered_candidates = _filter_gilt_candidates(
+        gilt_ranking_df=gilt_ranking_df,
+        current_holdings_df=enriched_holdings_df,
+        today=today,
     )
+    selection = select_trades(
+        current_holdings_df=enriched_holdings_df,
+        target_bucket_weights=lp_result.target_weights,
+        total_portfolio_gbp=total_portfolio,
+        gilt_candidates_df=filtered_candidates if not filtered_candidates.empty else None,
+        policy=policy,
+        gilt_price_lookup_df=gilt_ranking_df if not gilt_ranking_df.empty else None,
+    )
+    risk_gated = risk_gate_trades(
+        selection.gated_trades, selection.proposed_state_df, policy, maturity_by_isin
+    )
+    executable_df = apply_risk_gate_to_proposed_state(risk_gated, selection.proposed_state_df)
 
-    trade_result = construct_trades(translation.target_df, gilt_prices)
-    gated_trades = gate_trades(trade_result.trades, yield_improvement_bps, policy)
-    post_friction_df = apply_gate_to_proposed_state(gated_trades, trade_result.proposed_state_df)
-    risk_gated = risk_gate_trades(gated_trades, post_friction_df, policy, maturity_by_isin)
-    executable_df = apply_risk_gate_to_proposed_state(risk_gated, post_friction_df)
-
-    trades_payload = _trades_payload(gated_trades, risk_gated)
+    trades_payload = _trades_payload(selection.gated_trades, risk_gated)
     recommended_allocations = _recommended_allocations(executable_df, total_portfolio, policy)
-    all_warnings = trade_result.warnings + translation.warnings
+    all_warnings = selection.warnings
     scenario_results = run_scenarios(
         enriched_holdings_df, executable_df, policy, gilt_ranking_df, reference_date=today
     )
@@ -146,6 +159,7 @@ def build_lp_recommendation(
         warnings=all_warnings,
     )
 
+
 def _current_weights(
     enriched_holdings_df: pd.DataFrame,
     baseline_weights: dict[str, float],
@@ -160,16 +174,6 @@ def _current_weights(
     return weights
 
 
-def _gilt_prices(gilt_ranking_df: pd.DataFrame) -> dict[str, float]:
-    if gilt_ranking_df.empty:
-        return {}
-    return {
-        str(row["isin"]): float(row["clean_price_gbp"])
-        for _, row in gilt_ranking_df.iterrows()
-        if pd.notna(row.get("clean_price_gbp")) and row.get("isin")
-    }
-
-
 def _maturity_by_isin(
     gilt_ranking_df: pd.DataFrame,
     today: date,
@@ -179,26 +183,9 @@ def _maturity_by_isin(
     result: dict[str, float | None] = {}
     for _, row in gilt_ranking_df.iterrows():
         isin = row.get("isin")
-        maturity_date = row.get("maturity_date")
-        if isin and pd.notna(maturity_date):
-            try:
-                mat = date.fromisoformat(str(maturity_date))
-                result[str(isin)] = (mat - today).days / 365.25
-            except (ValueError, TypeError):
-                result[str(isin)] = None
-        elif isin:
-            result[str(isin)] = None
+        if isin:
+            result[str(isin)] = _parse_maturity_years(row.get("maturity_date"), today)
     return result
-
-
-def _yield_improvement_bps(gilt_ranking_df: pd.DataFrame) -> dict[str, float | None]:
-    if gilt_ranking_df.empty:
-        return {}
-    return {
-        str(row["isin"]): float(row["gry_pct"]) * 100.0
-        for _, row in gilt_ranking_df.iterrows()
-        if pd.notna(row.get("gry_pct")) and row.get("isin")
-    }
 
 
 def _score_coefficients(
@@ -225,6 +212,7 @@ def _trades_payload(
             "symbol": t.symbol,
             "bucket_id": t.bucket_id,
             "asset_type": t.asset_type,
+            "is_new_position": t.is_new_position,
             "delta_value_gbp": round(t.delta_value_gbp, 2),
             "current_value_gbp": round(t.current_value_gbp, 2),
             "target_value_gbp": round(t.target_value_gbp, 2),
@@ -334,3 +322,91 @@ def _make_record(
 
 def _utc_now() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_maturity_years(mat_date_val: Any, today: date) -> float | None:
+    """Return years to maturity from a maturity_date value, or None if unparseable."""
+    if mat_date_val is None or pd.isna(mat_date_val):
+        return None
+    try:
+        return (date.fromisoformat(str(mat_date_val)) - today).days / 365.25
+    except (ValueError, TypeError):
+        return None
+
+
+def _derive_bucket_id(row: pd.Series) -> str | None:
+    """Return bucket_id for a row that already has ``asset_type`` and ``_maturity_years``."""
+    asset_type = row.get("asset_type")
+    if not asset_type or pd.isna(asset_type):
+        return None
+    return assign_bucket({"asset_type": asset_type, "maturity_years": row.get("_maturity_years")}).bucket_id
+
+
+def _enrich_gilt_ranking(df: pd.DataFrame, today: date) -> pd.DataFrame:
+    """Add ``asset_type``, ``_maturity_years``, and ``bucket_id`` columns to a gilt ranking DataFrame."""
+    df = df.copy()
+    if "asset_type" not in df.columns:
+        df["asset_type"] = df["instrument_type"].map(_INSTRUMENT_TO_ASSET_TYPE)
+    df["_maturity_years"] = df["maturity_date"].map(lambda v: _parse_maturity_years(v, today))
+    df["bucket_id"] = df.apply(_derive_bucket_id, axis=1)
+    return df
+
+
+def _filter_gilt_candidates(
+    gilt_ranking_df: pd.DataFrame,
+    current_holdings_df: pd.DataFrame,
+    today: date,
+) -> pd.DataFrame:
+    """Return a pre-filtered candidate DataFrame for new-position MIP variables.
+
+    Enriches gilt_ranking_df with ``asset_type`` and ``bucket_id`` columns, then
+    applies signal-aligned filtering so only worthwhile candidates enter the MIP:
+
+    * Gilts already held (by ISIN) are excluded — they are existing variables.
+    * Rows missing ``clean_price_gbp`` or ``gry_pct`` are excluded.
+    * Per bucket with held gilts: only candidates whose ``gry_pct`` exceeds the
+      best held GRY by at least ``_SWITCH_GAP_THRESHOLD`` (same 10 bps the
+      Signals tab uses).
+    * For buckets with no held gilts: the top-``_MAX_EMPTY_BUCKET_CANDIDATES``
+      candidates by GRY are included.
+    """
+    if gilt_ranking_df.empty:
+        return pd.DataFrame()
+
+    held_isins: set[str] = set()
+    if not current_holdings_df.empty and "isin" in current_holdings_df.columns:
+        held_isins = {str(v) for v in current_holdings_df["isin"].dropna()}
+
+    df = _enrich_gilt_ranking(gilt_ranking_df, today)
+    df = df[~df["isin"].isin(held_isins)]
+    df = df[df["clean_price_gbp"].notna() & df["gry_pct"].notna() & df["bucket_id"].notna()]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Best held GRY per bucket — used to set the switch-opportunity threshold
+    held_gry_by_bucket: dict[str, float] = {}
+    if held_isins:
+        held_df = _enrich_gilt_ranking(gilt_ranking_df[gilt_ranking_df["isin"].isin(held_isins)], today)
+        for bucket, grp in held_df.groupby("bucket_id"):
+            gry_vals = grp["gry_pct"].dropna()
+            if not gry_vals.empty:
+                held_gry_by_bucket[str(bucket)] = float(gry_vals.max())
+
+    result_frames: list[pd.DataFrame] = []
+    for bucket_id, grp in df.groupby("bucket_id"):
+        bucket_str = str(bucket_id)
+        if bucket_str in held_gry_by_bucket:
+            threshold = held_gry_by_bucket[bucket_str] + _SWITCH_GAP_THRESHOLD
+            eligible = grp[grp["gry_pct"] > threshold]
+        else:
+            eligible = grp.nlargest(_MAX_EMPTY_BUCKET_CANDIDATES, "gry_pct")
+        result_frames.append(eligible)
+
+    if not result_frames:
+        return pd.DataFrame()
+
+    out = pd.concat(result_frames, ignore_index=True)
+    keep = [c for c in ["isin", "tidm", "asset_type", "bucket_id", "clean_price_gbp", "gry_pct",
+                         "maturity_date", "instrument_name"] if c in out.columns]
+    return out[keep].reset_index(drop=True)

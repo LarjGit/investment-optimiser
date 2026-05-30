@@ -113,6 +113,9 @@ def gate_trades(
     yield_improvement_bps_by_isin: dict[str, float | None],
     policy: dict[str, Any],
 ) -> list[GatedTrade]:
+    # DEPRECATED: replaced by security_selection.select_trades (MIP-based pipeline).
+    # Retained for backward compatibility with existing tests only.
+    # Will be removed once test_friction_gate.py is updated.
     fields = {f["key"]: f["default"] for f in policy["shared_assumption_schema"]["fields"]}
     commission_gbp: float = fields["interactive_investor_trade_fee_gbp"]
     hold_period_years: float = fields["expected_hold_period_years"]
@@ -162,6 +165,9 @@ def apply_gate_to_proposed_state(
     gated_trades: list[GatedTrade],
     proposed_state_df: pd.DataFrame,
 ) -> pd.DataFrame:
+    # DEPRECATED: replaced by security_selection.select_trades (MIP-based pipeline).
+    # Retained for backward compatibility with existing tests only.
+    # Will be removed once test_friction_gate.py is updated.
     df = proposed_state_df.copy()
     freed_cash = 0.0
 
