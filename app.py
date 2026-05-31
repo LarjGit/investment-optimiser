@@ -58,6 +58,7 @@ from investment_optimiser.scenario_comparison import (
 from investment_optimiser.recommendation_change_summary import (
     build_allocation_change_df,
     build_headline_metrics,
+    build_inflation_attribution,
 )
 from investment_optimiser.blocked_trade_display import (
     categorise_blocked_trades,
@@ -293,6 +294,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
         """
         SELECT
             p.isin,
+            r.tidm,
             r.instrument_name,
             r.instrument_type,
             p.maturity_date,
@@ -461,7 +463,8 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
             provider,
             MAX(confidence_tier) AS confidence_tier,
             MAX(is_degraded) AS is_degraded,
-            COUNT(DISTINCT isin) AS gilt_count
+            COUNT(DISTINCT isin) AS gilt_count,
+            MAX(settlement_date) AS as_of_date
         FROM observed_inflation_cache
         WHERE provider = 'DMO_D10C'
         GROUP BY provider
@@ -478,6 +481,7 @@ def read_shell_state(connection: Any) -> dict[str, Any]:
                 "confidence_tier": str(row["confidence_tier"]),
                 "is_degraded": bool(row["is_degraded"]),
                 "gilt_count": int(row["gilt_count"]) if pd.notna(row["gilt_count"]) else None,
+                "as_of_date": str(row["as_of_date"]) if pd.notna(row.get("as_of_date")) else None,
             }
 
     return {
@@ -1836,6 +1840,7 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
         with st.spinner("Running portfolio optimisation…", show_time=True):
             enriched = enrich_with_buckets(holdings)
             gilt_ranking_df = _build_lp_gilt_ranking(state["gilt_ranking"])
+            observed_freshness = state.get("observed_inflation_freshness")
             result = build_lp_recommendation(
                 enriched_holdings_df=enriched,
                 baseline_weights=current_baseline.weights,
@@ -1843,6 +1848,9 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
                 policy=policy,
                 snapshot_date=snapshot_date,
                 gilt_ranking_df=gilt_ranking_df,
+                forward_rpi_pre_2030_pct=st.session_state.get(RPI_ASSUMPTION_PRE_2030_KEY),
+                forward_rpi_post_2030_pct=st.session_state.get(RPI_ASSUMPTION_POST_2030_KEY),
+                observed_inflation_inputs=observed_freshness,
             )
         if result.solver_status != "optimal":
             st.error(
@@ -1909,8 +1917,16 @@ def _render_lp_recommendation(state: dict[str, Any], database_url: str) -> None:
 
         if passing:
             st.markdown("**Approved trades**")
-            pass_df = pd.DataFrame(passing)[["symbol", "bucket_id", "delta_value_gbp", "friction_outcome", "friction_note"]]
-            pass_df.columns = ["Symbol", "Bucket", "Delta (£)", "Friction", "Note"]
+
+            def _trade_action(t: dict) -> str:
+                if t.get("is_new_position"):
+                    return "New position"
+                return "Buy" if t["delta_value_gbp"] > 0 else "Sell"
+
+            pass_df = pd.DataFrame(passing)
+            pass_df["Action"] = pass_df.apply(_trade_action, axis=1)
+            pass_df = pass_df[["symbol", "bucket_id", "Action", "delta_value_gbp", "friction_outcome", "friction_note"]]
+            pass_df.columns = ["Symbol", "Bucket", "Action", "Delta (£)", "Friction", "Note"]
             pass_df["Delta (£)"] = pass_df["Delta (£)"].map(lambda v: f"£{v:+,.0f}")
             st.dataframe(pass_df, hide_index=True, use_container_width=True)
 
@@ -2041,6 +2057,46 @@ def _render_scenario_comparison(database_url: str) -> None:
             )
 
 
+def _render_inflation_attribution(infl: dict) -> None:
+    """Render a concise inflation-driver banner inside the Change Summary panel."""
+    category = infl.get("change_category", "unknown")
+
+    if category == "unknown":
+        st.caption("ℹ️ Inflation attribution unavailable — prior run predates inflation tracking.")
+        return
+
+    if category == "non_inflation":
+        st.caption("✅ No inflation inputs changed since the prior run.")
+        return
+
+    label_map = {
+        "observed_data": "📊 Observed inflation data refreshed",
+        "forward_assumptions": "⚙️ Forward RPI assumptions changed",
+        "both": "📊⚙️ Both observed data and forward assumptions changed",
+    }
+    st.info(label_map.get(category, category))
+
+    col_obs, col_fwd = st.columns(2)
+
+    obs_prior = infl.get("prior_observed_as_of_date")
+    obs_current = infl.get("current_observed_as_of_date")
+    if obs_prior or obs_current:
+        col_obs.metric(
+            "Observed data as-of",
+            obs_current or "—",
+            f"was {obs_prior}" if obs_prior != obs_current else None,
+        )
+
+    def _rpi_metric(label: str, prior: float | None, current: float | None) -> None:
+        if current is None:
+            return
+        delta = f"{current - prior:+.2f}" if prior is not None else None
+        col_fwd.metric(label, f"{current:.2f}", delta)
+
+    _rpi_metric("RPI pre-2030 (%)", infl.get("prior_forward_pre_2030_pct"), infl.get("current_forward_pre_2030_pct"))
+    _rpi_metric("RPI post-2030 (%)", infl.get("prior_forward_post_2030_pct"), infl.get("current_forward_post_2030_pct"))
+
+
 def _render_recommendation_change_summary(database_url: str) -> None:
     st.subheader("Change summary")
 
@@ -2110,6 +2166,9 @@ def _render_recommendation_change_summary(database_url: str) -> None:
                 "delta_pct": st.column_config.NumberColumn("Change", format="%+.1f%%"),
             },
         )
+
+    infl = build_inflation_attribution(prior_snap, current_snap)
+    _render_inflation_attribution(infl)
 
     with st.expander("Run details"):
         st.caption(f"Current run: {current_date}  |  Prior run: {prior_date}")

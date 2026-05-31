@@ -4,6 +4,15 @@ from typing import Any
 
 import pandas as pd
 
+_FLOAT_TOLERANCE = 1e-4
+
+
+def _floats_differ(a: float | None, b: float | None) -> bool:
+    """Return True when two nullable floats differ by more than _FLOAT_TOLERANCE."""
+    if a is None or b is None:
+        return a != b
+    return abs(a - b) > _FLOAT_TOLERANCE
+
 
 def build_allocation_change_df(
     prior_snap: dict[str, Any],
@@ -43,6 +52,64 @@ def build_allocation_change_df(
     if not rows:
         return pd.DataFrame(columns=["bucket_id", "label", "prior_pct", "current_pct", "delta_pct"])
     return pd.DataFrame(rows)
+
+
+def build_inflation_attribution(
+    prior_snap: dict[str, Any],
+    current_snap: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify why a recommendation changed relative to inflation inputs.
+
+    Returns a dict with:
+      change_category: "observed_data" | "forward_assumptions" | "both"
+                       | "non_inflation" | "unknown"
+      observed_data_changed: bool
+      forward_assumptions_changed: bool
+      prior/current_observed_as_of_date: str | None
+      prior/current_forward_pre_2030_pct: float | None
+      prior/current_forward_post_2030_pct: float | None
+
+    When either snapshot lacks ``inflation_inputs`` the category is "unknown".
+    """
+    prior_infl = prior_snap.get("policy_inputs", {}).get("inflation_inputs")
+    current_infl = current_snap.get("policy_inputs", {}).get("inflation_inputs")
+
+    p = prior_infl or {}
+    c = current_infl or {}
+    prior_obs_date = p.get("observed_as_of_date")
+    current_obs_date = c.get("observed_as_of_date")
+    prior_pre = p.get("forward_rpi_pre_2030_pct")
+    current_pre = c.get("forward_rpi_pre_2030_pct")
+    prior_post = p.get("forward_rpi_post_2030_pct")
+    current_post = c.get("forward_rpi_post_2030_pct")
+
+    if prior_infl is None or current_infl is None:
+        category = "unknown"
+        observed_data_changed = False
+        forward_assumptions_changed = False
+    else:
+        observed_data_changed = prior_obs_date != current_obs_date
+        forward_assumptions_changed = _floats_differ(prior_pre, current_pre) or _floats_differ(prior_post, current_post)
+        if observed_data_changed and forward_assumptions_changed:
+            category = "both"
+        elif observed_data_changed:
+            category = "observed_data"
+        elif forward_assumptions_changed:
+            category = "forward_assumptions"
+        else:
+            category = "non_inflation"
+
+    return {
+        "change_category": category,
+        "observed_data_changed": observed_data_changed,
+        "forward_assumptions_changed": forward_assumptions_changed,
+        "prior_observed_as_of_date": prior_obs_date,
+        "current_observed_as_of_date": current_obs_date,
+        "prior_forward_pre_2030_pct": prior_pre,
+        "current_forward_pre_2030_pct": current_pre,
+        "prior_forward_post_2030_pct": prior_post,
+        "current_forward_post_2030_pct": current_post,
+    }
 
 
 def build_headline_metrics(

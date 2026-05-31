@@ -48,12 +48,21 @@ def build_lp_recommendation(
     gilt_ranking_df: pd.DataFrame,
     *,
     reference_date: date | None = None,
+    forward_rpi_pre_2030_pct: float | None = None,
+    forward_rpi_post_2030_pct: float | None = None,
+    observed_inflation_inputs: dict[str, Any] | None = None,
 ) -> LPRecommendationResult:
     today = reference_date or date.today()
     total_portfolio = (
         float(enriched_holdings_df["market_value_gbp"].sum())
         if not enriched_holdings_df.empty
         else 0.0
+    )
+
+    inflation_inputs = _build_inflation_inputs(
+        forward_rpi_pre_2030_pct=forward_rpi_pre_2030_pct,
+        forward_rpi_post_2030_pct=forward_rpi_post_2030_pct,
+        observed_inflation_inputs=observed_inflation_inputs,
     )
 
     current_weights = _current_weights(enriched_holdings_df, baseline_weights, total_portfolio)
@@ -91,6 +100,7 @@ def build_lp_recommendation(
             binding_constraints=[],
             warnings=[],
             notes=lp_result.notes,
+            inflation_inputs=inflation_inputs,
         )
         return LPRecommendationResult(
             solver_status=lp_result.solver_status,
@@ -149,6 +159,7 @@ def build_lp_recommendation(
         warnings=all_warnings,
         notes=lp_result.notes,
         scenario_results=scenario_results,
+        inflation_inputs=inflation_inputs,
     )
 
     return LPRecommendationResult(
@@ -244,6 +255,24 @@ def _recommended_allocations(
     return result
 
 
+def _build_inflation_inputs(
+    *,
+    forward_rpi_pre_2030_pct: float | None,
+    forward_rpi_post_2030_pct: float | None,
+    observed_inflation_inputs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble the inflation_inputs sub-dict for policy_inputs."""
+    obs = observed_inflation_inputs or {}
+    return {
+        "forward_rpi_pre_2030_pct": forward_rpi_pre_2030_pct,
+        "forward_rpi_post_2030_pct": forward_rpi_post_2030_pct,
+        "observed_as_of_date": obs.get("as_of_date"),
+        "observed_provider": obs.get("provider"),
+        "observed_confidence_tier": obs.get("confidence_tier"),
+        "observed_is_degraded": obs.get("is_degraded"),
+    }
+
+
 def _build_snapshot(
     *,
     policy: dict[str, Any],
@@ -264,17 +293,22 @@ def _build_snapshot(
     binding_constraint_details: list[dict] | None = None,
     marginals: dict[str, float] | None = None,
     scenario_results: list[dict] | None = None,
+    inflation_inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy_inputs: dict[str, Any] = {
+        "policy_version": policy["policy_version"],
+        "baseline_version": baseline_label,
+        "scenario_set_name": policy["scenario_set_name"],
+        "regime_state": _REGIME_STATE_DEFAULT,
+        "constraints": list(policy["default_constraints"].keys()),
+        "score_coefficients": score_coefficients,
+    }
+    if inflation_inputs is not None:
+        policy_inputs["inflation_inputs"] = inflation_inputs
+
     return {
         "schema_version": ALLOCATION_RUN_SCHEMA_VERSION,
-        "policy_inputs": {
-            "policy_version": policy["policy_version"],
-            "baseline_version": baseline_label,
-            "scenario_set_name": policy["scenario_set_name"],
-            "regime_state": _REGIME_STATE_DEFAULT,
-            "constraints": list(policy["default_constraints"].keys()),
-            "score_coefficients": score_coefficients,
-        },
+        "policy_inputs": policy_inputs,
         "current_holdings": {
             "snapshot_date": snapshot_date,
             "total_market_value_gbp": total_portfolio,

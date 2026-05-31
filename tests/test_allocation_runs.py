@@ -107,6 +107,39 @@ def test_dump_allocation_run_snapshot_json_is_canonical_and_round_trips() -> Non
     assert json.loads(dumped_snapshot) == record.snapshot
 
 
+def test_snapshot_with_inflation_inputs_round_trips(tmp_path: Path) -> None:
+    """inflation_inputs inside policy_inputs survives insert → fetch."""
+    db_path = tmp_path / "allocation_runs.db"
+    initialize_database(f"sqlite:///{db_path.as_posix()}")
+    record = sample_allocation_run_record()
+
+    # Inject inflation_inputs into policy_inputs
+    snapshot_with_inflation = dict(record.snapshot)
+    policy_inputs_with_inflation = dict(snapshot_with_inflation["policy_inputs"])
+    policy_inputs_with_inflation["inflation_inputs"] = {
+        "forward_rpi_pre_2030_pct": 3.0,
+        "forward_rpi_post_2030_pct": 2.5,
+        "observed_as_of_date": "2026-05-27",
+        "observed_provider": "DMO_D10C",
+        "observed_confidence_tier": "authoritative",
+        "observed_is_degraded": False,
+    }
+    snapshot_with_inflation["policy_inputs"] = policy_inputs_with_inflation
+    enriched_record = replace(record, snapshot=snapshot_with_inflation)
+
+    with sqlite3.connect(db_path) as connection:
+        run_id = insert_allocation_run(connection, enriched_record)
+        connection.commit()
+
+    with sqlite3.connect(db_path) as connection:
+        stored = fetch_allocation_run(connection, run_id)
+
+    assert stored == enriched_record
+    infl = stored.snapshot["policy_inputs"]["inflation_inputs"]
+    assert infl["forward_rpi_pre_2030_pct"] == pytest.approx(3.0)
+    assert infl["observed_as_of_date"] == "2026-05-27"
+
+
 def test_insert_allocation_run_rejects_mismatched_scalar_metadata(
     tmp_path: Path,
 ) -> None:
