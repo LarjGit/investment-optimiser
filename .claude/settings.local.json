@@ -37,7 +37,16 @@
       "Bash(git commit -m 'docs: archive implementation-status v1; add PRD and solutions note *)",
       "Bash(git commit -m 'chore: allow IL-file grep pattern in project settings *)",
       "Bash(Get-ChildItem -Path \"C:\\\\workbench\\\\code\\\\investment-optimiser\" -Directory)",
-      "Bash(Select-Object -ExpandProperty Name)"
+      "Bash(Select-Object -ExpandProperty Name)",
+      "Bash(Get-Content *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'State: {d[\\\\\"state\\\\\"]}\\\\nTitle: {d[\\\\\"title\\\\\"]}'\\)\")",
+      "Bash(curl -s http://localhost:8501/)",
+      "Bash(Remove-Item issue_body.md)",
+      "Bash(Select-Object -First 5)",
+      "Bash(Select-Object -First 3)",
+      "Bash(Read-Content docs/solutions/gh-issue-mip-new-positions.md -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 30)",
+      "Bash(git commit -m 'chore: expand allowed commands in project local settings *)"
     ]
   }
 }
